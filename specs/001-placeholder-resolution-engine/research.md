@@ -3,7 +3,7 @@
 *Phase 0 output — generated 2026-05-23*
 
 All NEEDS CLARIFICATION items from the Technical Context are resolved below. Findings come from
-live database inspection (Docker container `strongmail_postgres`, database `strongmail`),
+live database inspection (Docker container `strongmail_postgres`, database `strongmail-tov`),
 reading `samples/rule_engine.py`, and the authoritative spec clarifications.
 
 ---
@@ -251,7 +251,7 @@ namespace prefix; inner dots are part of the key name).
 
 ## 8. Database Connection
 
-**Decision**: Use `postgresql://postgres:postgres@localhost:5432/strongmail` — the single
+**Decision**: Use `postgresql://postgres:postgres@localhost:5432/strongmail-tov` — the single
 database created by `docker-compose.yml`. This is the authoritative database for both
 development and integration testing.
 

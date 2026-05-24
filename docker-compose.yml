@@ -7,12 +7,16 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: strongmail
+      POSTGRES_DB: strongmail-tov
     ports:
-      - "5432:5432"
+      - "15433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/strongmail_tov_backup.sql:/docker-entrypoint-initdb.d/01-strongmail_tov_backup.sql
+  redis:
+    image: redis:7-alpine
+    container_name: strongmail_redis
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
