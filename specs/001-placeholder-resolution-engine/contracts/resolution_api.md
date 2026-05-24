@@ -328,7 +328,7 @@ from shared.redis_client import init_redis, get_redis
 from shared.resolution import build_resolution_graph, resolve_body
 
 # Agent startup — once per process
-await init_pool("postgresql://postgres:postgres@localhost:5432/strongmail")
+await init_pool("postgresql://postgres:postgres@localhost:5432/strongmail-tov")
 await init_redis("redis://localhost:6379/0")
 
 pool = get_pool()

@@ -30,7 +30,7 @@ string and a structured list of all unresolvable entries with typed reason codes
   hash under key `working-copy:{template_name}:{session_id}`; fields are canonical placeholder keys
 
 **Testing**: `pytest` + `pytest-asyncio`; real PostgreSQL at
-`postgresql://postgres:postgres@localhost:5432/strongmail`; real Redis; no mocks
+`postgresql://postgres:postgres@localhost:15433/strongmail-tov`; real Redis; no mocks
 
 **Target Platform**: Linux server (library imported by ADK agents; no web framework, no CLI)
 
