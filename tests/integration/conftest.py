@@ -1,12 +1,16 @@
 import pytest
 import pytest_asyncio
-from shared.config import DATABASE_URL, REDIS_URL
+from shared.config import REDIS_URL, get_test_database_url
 from shared.db import init_pool, close_pool
 from shared.redis_client import init_redis
+from shared.test_db import assert_test_database, ensure_test_database
 
 @pytest_asyncio.fixture(scope="function")
 async def db_pool():
-    pool = await init_pool(DATABASE_URL)
+    test_database_url = get_test_database_url()
+    assert_test_database(test_database_url)
+    await ensure_test_database(test_database_url)
+    pool = await init_pool(test_database_url)
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS template (id text PRIMARY KEY, name text);

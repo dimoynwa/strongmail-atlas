@@ -8,7 +8,19 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
 .specify
 .env
+.env.*
+!.env.example
 .claude
 db
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local dev data / runtime
+backup/*.sql
+template_assistant/.adk/
