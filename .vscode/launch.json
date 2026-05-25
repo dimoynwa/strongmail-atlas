@@ -16,6 +16,31 @@
             "justMyCode": false
         },
         {
+            "name": "ADK Web: Template Assistant",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "google.adk.cli",
+            "args": [
+                "web",
+                "template_assistant",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--reload"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TEMPLATE_NAME": "NFY_PASSWORD_CREATED",
+                "LANG_LOCAL": "EN",
+                "PARAM_CUST_BRAND": "SKRILL",
+                "TEMPLATE_ASSISTANT_MODEL": "bedrock_nova_pro"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "Python: Resolution smoke test",
             "type": "debugpy",
             "request": "launch",
