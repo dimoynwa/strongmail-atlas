@@ -61,14 +61,15 @@ async def resolve_template(session_context: SessionContext) -> ResolutionResult:
     pool = get_pool()
     redis_client = get_redis()
     graph = await build_resolution_graph(pool, session_context.template_name)
-    html_body, _text_body = await fetch_template_bodies(
+    html_body, text_body = await fetch_template_bodies(
         pool,
         session_context.template_name,
         session_context.lang_local,
         session_context.param_cust_brand,
     )
     context = build_resolution_context(session_context)
-    return await resolve_body(
+    accumulated_keys: set[str] = set()
+    html_result = await resolve_body(
         pool,
         redis_client,
         graph,
@@ -76,6 +77,23 @@ async def resolve_template(session_context: SessionContext) -> ResolutionResult:
         context,
         session_context.session_id,
         session_context.template_name,
+        accumulated_keys=accumulated_keys,
+    )
+    if text_body:
+        await resolve_body(
+            pool,
+            redis_client,
+            graph,
+            text_body,
+            context,
+            session_context.session_id,
+            session_context.template_name,
+            accumulated_keys=accumulated_keys,
+        )
+    return ResolutionResult(
+        resolved_body=html_result.resolved_body,
+        unresolvable=html_result.unresolvable,
+        resolved_keys=sorted(accumulated_keys),
     )
 
 

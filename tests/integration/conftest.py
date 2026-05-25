@@ -14,6 +14,13 @@ async def db_pool():
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS template (id text PRIMARY KEY, name text);
+            CREATE TABLE IF NOT EXISTS template_details (
+                template_id text,
+                lang_local text,
+                param_cust_brand text,
+                html text,
+                text text
+            );
             CREATE TABLE IF NOT EXISTS template_content_block (template_id text, content_block_id text);
             CREATE TABLE IF NOT EXISTS content_block (id text PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS content_block_details (id bigint PRIMARY KEY, content_block_id text);
@@ -28,4 +35,15 @@ async def db_pool():
 async def redis_client():
     client = await init_redis(REDIS_URL)
     yield client
+    await client.flushdb()
     await client.aclose()
+
+
+@pytest.fixture
+def session_state():
+    return {
+        "session_id": "test-session-001",
+        "template_name": "TestTemplate",
+        "lang_local": "en-us",
+        "param_cust_brand": "brandx",
+    }

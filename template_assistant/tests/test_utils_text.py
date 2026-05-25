@@ -39,11 +39,11 @@ def test_footer_markers_are_stripped():
 def test_strip_footer_text_helper():
     from template_assistant.utils.text import _strip_footer_text
 
-    text = "Main body content. Skrill Limited is registered in England. Extra footer."
+    text = "Main body content.\nregistered in England and Wales\nExtra footer."
     assert _strip_footer_text(text) == "Main body content."
 
 
-def test_newlines_are_replaced_with_spaces():
+def test_newlines_are_preserved_in_footer_strip():
     from template_assistant.utils.text import _strip_footer_text
 
-    assert _strip_footer_text("Line one\nLine two") == "Line one Line two"
+    assert _strip_footer_text("Line one\nLine two") == "Line one\nLine two"

@@ -31,7 +31,7 @@
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "TEMPLATE_NAME": "NFY_PASSWORD_CREATED",
+                "TEMPLATE_NAME": "NFY_SM_REGISTERED",
                 "LANG_LOCAL": "EN",
                 "PARAM_CUST_BRAND": "SKRILL",
                 "TEMPLATE_ASSISTANT_MODEL": "bedrock_nova_pro"

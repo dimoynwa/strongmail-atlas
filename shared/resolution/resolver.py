@@ -1,5 +1,5 @@
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncpg
 import redis.asyncio as aioredis
 import types
@@ -13,7 +13,7 @@ from shared.resolution.preprocessors import (
 )
 
 PLACEHOLDER_PATTERN = re.compile(
-    r"##(?:/?/?\\?[A-Za-z0-9_.]+|\[F\]\[S\]\[P\]\[(?:\\)*[A-Za-z0-9_.]+\])##"
+    r"##(?:/?/?\\?[A-Za-z0-9_.-]+|\[F\]\[S\]\[P\]\[(?:\\)*[A-Za-z0-9_.-]+\])##"
 )
 
 class ReasonCode(str, Enum):
@@ -32,6 +32,7 @@ class UnresolvableEntry:
 class ResolutionResult:
     resolved_body: str                        # fully substituted string
     unresolvable: list[UnresolvableEntry]     # all keys that could not be resolved
+    resolved_keys: list[str] = field(default_factory=list)
 
 class WorkingCopyUnavailableError(RuntimeError):
     """Redis working-copy store is unreachable; resolution cannot proceed."""
@@ -60,9 +61,13 @@ async def _resolve_node(
     template_name: str,
     visiting: list[str],
     unresolvable: list[UnresolvableEntry],
+    resolved_keys: set[str] | None = None,
 ) -> str | None:
     canonical = normalize_key(raw_key)
     expanded = preprocess_key(canonical, context)
+
+    if resolved_keys is not None:
+        resolved_keys.add(expanded)
 
     if is_synthetic_context_key(expanded) and expanded in context:
         return context[expanded]
@@ -107,7 +112,9 @@ async def _resolve_node(
                         val = res
                         if val.startswith("SM_RULE_") or re.match(r"^[A-Z0-9_.]+$", val):
                             # It's a key or another rule, need to resolve it
-                            resolved_val = await _resolve_node(val, pool, redis_client, graph, context, session_id, template_name, visiting, unresolvable)
+                            resolved_val = await _resolve_node(
+                                val, pool, redis_client, graph, context, session_id, template_name, visiting, unresolvable, resolved_keys
+                            )
                             if resolved_val is None:
                                 unresolvable.append(UnresolvableEntry(expanded, ReasonCode.BROKEN_RULE_CHAIN, f"Target key {val} missing"))
                                 return None
@@ -128,7 +135,9 @@ async def _resolve_node(
         for m in PLACEHOLDER_PATTERN.finditer(val):
             result_parts.append(val[last_index:m.start()])
             inner_raw = m.group(0)
-            inner_resolved = await _resolve_node(inner_raw, pool, redis_client, graph, context, session_id, template_name, visiting, unresolvable)
+            inner_resolved = await _resolve_node(
+                inner_raw, pool, redis_client, graph, context, session_id, template_name, visiting, unresolvable, resolved_keys
+            )
             if inner_resolved is not None:
                 result_parts.append(inner_resolved)
             else:
@@ -149,26 +158,31 @@ async def resolve_body(
     context: dict[str, str],
     session_id: str,
     template_name: str,
+    accumulated_keys: set[str] | None = None,
 ) -> ResolutionResult:
     unresolvable: list[UnresolvableEntry] = []
-    
+    resolved_keys = accumulated_keys if accumulated_keys is not None else set()
+
     result_parts = []
     last_index = 0
     for m in PLACEHOLDER_PATTERN.finditer(body):
         result_parts.append(body[last_index:m.start()])
         raw_key = m.group(0)
-        resolved_val = await _resolve_node(raw_key, pool, redis_client, graph, context, session_id, template_name, [], unresolvable)
+        resolved_val = await _resolve_node(
+            raw_key, pool, redis_client, graph, context, session_id, template_name, [], unresolvable, resolved_keys
+        )
         if resolved_val is not None:
             result_parts.append(resolved_val)
         else:
             result_parts.append(raw_key)
         last_index = m.end()
-        
+
     result_parts.append(body[last_index:])
-    
+
     return ResolutionResult(
         resolved_body="".join(result_parts),
-        unresolvable=unresolvable
+        unresolvable=unresolvable,
+        resolved_keys=sorted(resolved_keys),
     )
 
 async def resolve_key(
@@ -181,7 +195,9 @@ async def resolve_key(
     template_name: str,
 ) -> tuple[str | None, list[UnresolvableEntry]]:
     unresolvable: list[UnresolvableEntry] = []
-    val = await _resolve_node(key, pool, redis_client, graph, context, session_id, template_name, [], unresolvable)
+    val = await _resolve_node(
+        key, pool, redis_client, graph, context, session_id, template_name, [], unresolvable
+    )
     return val, unresolvable
 
 async def scan_unresolvable(
