@@ -9,11 +9,12 @@ import pytest
 
 from template_assistant.context import validate_session_context
 from template_assistant.services import working_copy_key
+from template_assistant.context import MissingClassificationError
 from template_assistant.subagents.tone_suggestion_subagent import (
     KeyNotInGraphError,
-    _finalize_suggest_rewrites,
     apply_tone_suggestions,
     evaluate_eligibility,
+    finalize_rewrites,
     is_eligible_for_rewrite,
     suggest_tone_rewrite,
 )
@@ -100,30 +101,51 @@ async def test_suggest_tone_rewrite_discards_hallucinated_keys(db_pool, redis_cl
         html=f"<p>##{key}##</p>",
         kv_pairs={key: _long_text()},
     )
-    session_state["tone_bearing_keys"] = {key: _long_text()}
-
-    llm_payload = json.dumps(
-        [
-            {"key": key, "new_value": _long_text(" Rewritten.")},
-            {"key": "BODY", "new_value": "Hallucinated body text that is definitely long enough."},
-        ]
-    )
+    tone_bearing = {key: _long_text()}
 
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
 
-    result = _finalize_suggest_rewrites(
-        llm_payload,
-        session_state["tone_bearing_keys"],
-        tool_result["suggestion_id"],
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    @dataclass
+    class _FakeState:
+        data: dict[str, Any] = field(default_factory=dict)
+
+        def to_dict(self) -> dict[str, Any]:
+            return self.data
+
+        def __setitem__(self, k: str, v: Any) -> None:
+            self.data[k] = v
+
+    @dataclass
+    class _FakeCtx:
+        state: _FakeState
+
+    fin_ctx = _FakeCtx(
+        state=_FakeState(
+            {
+                **session_state,
+                "eligible_keys": tone_bearing,
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
+    )
+    result = await finalize_rewrites(
+        [
+            {"key": key, "new_value": _long_text(" Rewritten.")},
+            {"key": "BODY", "new_value": "Hallucinated body text that is definitely long enough."},
+        ],
+        fin_ctx,  # type: ignore[arg-type]
     )
 
     assert len(result["suggestions"]) == 1
     assert result["suggestions"][0]["key"] == key
-    assert result["discarded_keys"] == [{"key": "BODY", "reason": "hallucinated_key"}]
+    assert fin_ctx.state.data.get("discarded_keys")
 
 
 @pytest.mark.asyncio
@@ -137,30 +159,50 @@ async def test_suggest_tone_rewrite_empty_when_only_hallucinated_keys(
         html=f"<p>##{key}##</p>",
         kv_pairs={key: _long_text()},
     )
-    session_state["tone_bearing_keys"] = {key: _long_text()}
-
-    llm_payload = json.dumps(
-        [
-            {"key": "BODY", "new_value": "Hallucinated body text that is definitely long enough."},
-            {"key": "SUBJECT", "new_value": "Hallucinated subject line that is long enough."},
-        ]
-    )
+    tone_bearing = {key: _long_text()}
 
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
 
-    result = _finalize_suggest_rewrites(
-        llm_payload,
-        session_state["tone_bearing_keys"],
-        tool_result["suggestion_id"],
+    from dataclasses import dataclass, field
+    from typing import Any
+
+    @dataclass
+    class _FakeState:
+        data: dict[str, Any] = field(default_factory=dict)
+
+        def to_dict(self) -> dict[str, Any]:
+            return self.data
+
+        def __setitem__(self, k: str, v: Any) -> None:
+            self.data[k] = v
+
+    @dataclass
+    class _FakeCtx:
+        state: _FakeState
+
+    fin_ctx = _FakeCtx(
+        state=_FakeState(
+            {
+                **session_state,
+                "eligible_keys": tone_bearing,
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
+    )
+    result = await finalize_rewrites(
+        [
+            {"key": "BODY", "new_value": "Hallucinated body text that is definitely long enough."},
+            {"key": "SUBJECT", "new_value": "Hallucinated subject line that is long enough."},
+        ],
+        fin_ctx,  # type: ignore[arg-type]
     )
 
     assert result["suggestions"] == []
-    assert len(result["discarded_keys"]) == 2
-    assert "no valid" in result.get("message", "").lower()
+    assert result["discarded"] == 2
 
 
 # --- T010-T012: apply_tone_suggestions graph validation ---

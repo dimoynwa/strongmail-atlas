@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 class SessionContextMissingError(ValueError):
     """Raised when required session context fields are absent."""
+
+
+class MissingClassificationError(Exception):
+    """Raised when tone suggestions are requested without classified keys."""
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "error": "MissingClassificationError",
+            "message": "Key classification must run before tone suggestions can be generated.",
+        }
+
+
+class SuggestionIdMismatchError(Exception):
+    """Raised when apply receives suggestions from a stale batch."""
+
+    def __init__(self, expected: str, received: str) -> None:
+        self.expected = expected
+        self.received = received
+        super().__init__(f"Expected suggestion_id {expected!r}, got {received!r}.")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "error": "SuggestionIdMismatchError",
+            "message": "The suggestion batch has expired. Please generate new suggestions.",
+        }
 
 
 @dataclass(frozen=True)

@@ -4,21 +4,23 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from google.adk.agents import LlmAgent
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.tool_context import ToolContext
-from google.genai.types import Content
 
 from template_assistant.llm import get_llm_model
 
 from shared.db import get_pool
 from shared.redis_client import get_redis
 from shared.resolution.graph_builder import build_resolution_graph
-from template_assistant.context import SessionContext, validate_session_context
+from template_assistant.context import (
+    MissingClassificationError,
+    SessionContext,
+    SuggestionIdMismatchError,
+    validate_session_context,
+)
 from template_assistant.ml.goemotions import get_classifier, scores_from_pipeline_result
 from template_assistant.models import ToneSuggestion
 from template_assistant.services import (
@@ -33,16 +35,18 @@ from template_assistant.utils.text import extract_plain_text
 
 logger = logging.getLogger(__name__)
 
-ClassifierLlmFn = Callable[[str], Awaitable[str]]
-
-_classifier_llm_fn: ClassifierLlmFn | None = None
-
 _SUGGEST_AGENT_INSTRUCTION = (
     "You are generating tone rewrites. The keys in rewrite_prompt are "
     "ordered by their reading sequence in the email — rewrite them as a "
     "coherent set, not independently. Return JSON only: a list of objects "
     "with 'key' and 'new_value' fields. Return ONLY keys from eligible_keys. "
     "Do not annotate, append labels, or copy values unchanged."
+)
+
+_SNAPSHOT_OVERWRITE_WARNING = (
+    "Note: applying these suggestions will replace the undo snapshot from "
+    "your previous suggestion batch. You will not be able to undo that earlier "
+    "batch individually after confirming."
 )
 
 _STRUCTURAL_SUFFIXES = (
@@ -79,11 +83,11 @@ _STRUCTURAL_SUBSTRINGS = (
     "BEACON",
     "VIEWINBROWSER",
     "VIEW_IN_BROWSER",
-    'LOGO',
-    'ICON',
-    'COLOR',
-    'COLOUR',
-    'BACKGROUND',
+    "LOGO",
+    "ICON",
+    "COLOR",
+    "COLOUR",
+    "BACKGROUND",
 )
 
 _COLOUR_PATTERN = re.compile(
@@ -124,11 +128,6 @@ class KeyNotInGraphError(Exception):
             "invalid_keys": self.invalid_keys,
             "valid_keys_not_written": self.valid_keys_not_written,
         }
-
-
-def set_classifier_llm_fn(fn: ClassifierLlmFn | None) -> None:
-    global _classifier_llm_fn
-    _classifier_llm_fn = fn
 
 
 def _apply_structural_heuristics(key: str) -> bool:
@@ -189,10 +188,7 @@ async def _llm_classify_keys(keys: dict[str, str]) -> dict[str, str]:
     if not keys:
         return {}
     prompt = _build_classifier_prompt(keys)
-    if _classifier_llm_fn is not None:
-        raw = await _classifier_llm_fn(prompt)
-    else:
-        raw = await _default_classifier_llm(prompt)
+    raw = await _default_classifier_llm(prompt)
     classified = _parse_classifier_response(raw)
     input_keys = set(keys.keys())
     return {key: role for key, role in classified.items() if key in input_keys}
@@ -457,62 +453,120 @@ def _strip_json_fences(raw: str) -> str:
     return cleaned.strip()
 
 
-def _extract_agent_response_text(callback_context: CallbackContext) -> str | None:
-    for event in reversed(callback_context.session.events):
-        if event.author != "SuggestAgent":
+def _normalize_rewrite_items(rewrites: Any) -> list[dict[str, str]]:
+    """Normalize rewrite input from tool callers or raw JSON strings."""
+    if isinstance(rewrites, str):
+        rewrites = _parse_llm_rewrites(_strip_json_fences(rewrites))
+    if not isinstance(rewrites, list):
+        raise ValueError("Rewrites must be a JSON list")
+    normalized: list[dict[str, str]] = []
+    for item in rewrites:
+        if not isinstance(item, dict):
             continue
-        if not event.content or not event.content.parts:
-            continue
-        texts = [
-            part.text
-            for part in event.content.parts
-            if hasattr(part, "text") and part.text
-        ]
-        if texts:
-            return "".join(texts).strip()
-    return None
+        key = item.get("key")
+        new_value = item.get("new_value")
+        if isinstance(key, str) and isinstance(new_value, str):
+            normalized.append({"key": key, "new_value": new_value})
+    return normalized
 
 
-def _finalize_suggest_rewrites(
-    raw_response: str,
-    eligible: dict[str, str],
-    suggestion_id: str,
+async def load_eligible_keys(
+    force_reload: bool,
+    tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Parse and validate SuggestAgent JSON rewrites for session state."""
-    raw_items = _parse_llm_rewrites(_strip_json_fences(raw_response))
+    """Load eligible keys into session state, with optional cache bypass."""
+    state = tool_context.state.to_dict()
+    if not force_reload and state.get("eligible_keys"):
+        eligible = state["eligible_keys"]
+        return {"eligible_keys": eligible, "total": len(eligible)}
+
+    if force_reload and "eligible_keys" in tool_context.state.to_dict():
+        tool_context.state["eligible_keys"] = {}
+
+    try:
+        session_context = validate_session_context(state)
+        pool = get_pool()
+        graph = await build_resolution_graph(pool, session_context.template_name)
+        resolution = await resolve_template(session_context)
+        eligible, _ = await _build_reachable_eligible(
+            graph, resolution, session_context, state
+        )
+        tool_context.state["eligible_keys"] = eligible
+        return {"eligible_keys": eligible, "total": len(eligible)}
+    except Exception as exc:
+        logger.warning("Failed to load eligible keys", exc_info=True)
+        return {
+            "error": type(exc).__name__,
+            "message": f"Could not load eligible keys: {exc}",
+        }
+
+
+async def finalize_rewrites(
+    rewrites: list[dict] | str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Validate LLM rewrites and write suggestions to session state."""
+    state = tool_context.state.to_dict()
+    eligible = dict(state.get("eligible_keys", {}))
+    suggestion_id = state.get("suggestion_id")
+    if not suggestion_id:
+        return {
+            "error": "missing_suggestion_id",
+            "message": "Cannot finalize rewrites without a suggestion_id in session state.",
+        }
+
+    try:
+        raw_items = _normalize_rewrite_items(rewrites)
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "error": "parse_error",
+            "message": "SuggestAgent returned invalid JSON.",
+        }
+
     accepted, discarded = _validate_llm_rewrites(raw_items, eligible)
     suggestions = [
-        item
+        {
+            "key": item["key"],
+            "old_value": eligible.get(item["key"], ""),
+            "new_value": item["new_value"],
+            "suggestion_id": suggestion_id,
+        }
         for item in accepted
         if item["new_value"] != eligible.get(item["key"], "")
     ]
-    payload: dict[str, Any] = {
+
+    tool_context.state["suggestions"] = suggestions
+    if discarded:
+        tool_context.state["discarded_keys"] = [asdict(d) for d in discarded]
+
+    return {
+        "accepted": len(suggestions),
+        "discarded": len(discarded) + (len(accepted) - len(suggestions)),
         "suggestions": suggestions,
-        "suggestion_id": suggestion_id,
-        "discarded_keys": [asdict(d) for d in discarded],
     }
-    if not suggestions:
-        payload["message"] = "No valid tone rewrite keys were generated."
-    return payload
 
 
-async def suggest_tone_rewrite(target_intent: str, session_state: dict) -> dict[str, Any]:
+async def suggest_tone_rewrite(
+    target_intent: str,
+    tone_bearing_keys: dict[str, str] | None,
+    session_state: dict,
+) -> dict[str, Any]:
     """Build the rewrite prompt and metadata for SuggestAgent to produce rewrites."""
-    session_context = validate_session_context(session_state)
-
-    if "tone_bearing_keys" not in session_state:
-        return {
-            "error": "missing_tone_bearing_keys",
-            "message": "KeyClassifierAgent must run before SuggestAgent.",
-        }
-    eligible = dict(session_state["tone_bearing_keys"])
-    if not eligible:
+    if tone_bearing_keys is None:
+        raise MissingClassificationError()
+    if not tone_bearing_keys:
         return {"message": "No eligible keys found for tone rewriting."}
+
+    session_context = validate_session_context(session_state)
+    eligible = dict(tone_bearing_keys)
 
     target_profile = lookup_tone_profile(target_intent)
     if target_profile is None:
         target_profile = {"optimism": 0.5, "approval": 0.5}
 
+    pool = get_pool()
+    redis_client = get_redis()
+    graph = await build_resolution_graph(pool, session_context.template_name)
     resolution = await resolve_template(session_context)
     plain_text = extract_plain_text(resolution.resolved_body)
     if plain_text:
@@ -529,6 +583,13 @@ async def suggest_tone_rewrite(target_intent: str, session_state: dict) -> dict[
     ordered_keys = [
         key for key, _ in _order_keys_by_reading_position(eligible, resolution.resolved_body)
     ]
+
+    snap_key = snapshot_key(session_context)
+    existing_snapshot = await redis_client.hgetall(snap_key)
+    snapshot_overwritten = bool(existing_snapshot)
+    await capture_snapshot(ordered_keys, session_context, redis_client, graph)
+    snapshot_saved = bool(ordered_keys)
+
     rewrite_prompt = _build_llm_prompt(
         eligible, target_intent, target_profile, resolution.resolved_body
     )
@@ -538,6 +599,8 @@ async def suggest_tone_rewrite(target_intent: str, session_state: dict) -> dict[
         "target_emotions": target_profile,
         "baseline_emotions": baseline,
         "suggestion_id": suggestion_id,
+        "snapshot_saved": snapshot_saved,
+        "snapshot_overwritten": snapshot_overwritten,
         "instruction": _SUGGEST_AGENT_INSTRUCTION,
     }
 
@@ -546,22 +609,28 @@ async def apply_tone_suggestions(
     suggestions: list[dict[str, Any]] | list[ToneSuggestion],
     session_state: dict,
 ) -> dict:
-    """Snapshot affected keys, then write suggestions to the working copy."""
+    """Write confirmed suggestions to the working copy."""
     session_context = validate_session_context(session_state)
+    expected_suggestion_id = session_state.get("suggestion_id")
+
     normalized: list[ToneSuggestion] = []
     for item in suggestions:
         if isinstance(item, ToneSuggestion):
             normalized.append(item)
-        else:
-            suggested = item.get("suggested_value", item.get("new_value", ""))
-            normalized.append(
-                ToneSuggestion(
-                    key=item["key"],
-                    current_value=item.get("current_value", ""),
-                    suggested_value=suggested,
-                    predicted_delta=item.get("predicted_delta", {}),
-                )
+            continue
+        item_suggestion_id = item.get("suggestion_id")
+        if expected_suggestion_id and item_suggestion_id:
+            if item_suggestion_id != expected_suggestion_id:
+                raise SuggestionIdMismatchError(expected_suggestion_id, item_suggestion_id)
+        suggested = item.get("suggested_value", item.get("new_value", ""))
+        normalized.append(
+            ToneSuggestion(
+                key=item["key"],
+                current_value=item.get("current_value", item.get("old_value", "")),
+                suggested_value=suggested,
+                predicted_delta=item.get("predicted_delta", {}),
             )
+        )
 
     if not normalized:
         return {"applied": 0, "message": "No suggestions to apply."}
@@ -586,20 +655,12 @@ async def apply_tone_suggestions(
             valid_keys_not_written=valid_keys,
         )
 
-    snap_key = snapshot_key(session_context)
-    existing_snapshot = await redis_client.hgetall(snap_key)
-    snapshot_overwritten = bool(existing_snapshot)
-
-    keys = [item.key for item in normalized]
-    await capture_snapshot(keys, session_context, redis_client, graph)
-
     for item in normalized:
         await set_working_copy_value(item.key, item.suggested_value, session_state)
 
     return {
         "applied": len(normalized),
         "message": f"Applied {len(normalized)} tone rewrites.",
-        "snapshot_overwritten": snapshot_overwritten,
     }
 
 
@@ -618,6 +679,7 @@ async def undo_tone_suggestions(
         return {
             "restored": 0,
             "message": "No tone suggestion snapshot found for this session.",
+            "snapshot_cleared": False,
         }
 
     target_keys = keys if keys is not None else list(snapshot.keys())
@@ -633,87 +695,38 @@ async def undo_tone_suggestions(
             await redis_client.hset(wc_key, canonical, original)
         restored += 1
 
-    return {"restored": restored, "message": f"Restored {restored} placeholder(s)."}
+    snapshot_cleared = keys is None
+    if snapshot_cleared:
+        await redis_client.delete(snap_key)
 
-
-async def _populate_eligible_keys(
-    callback_context: CallbackContext,
-) -> Content | None:
-    """Populate session.state eligible_keys before the orchestrator LLM runs.
-
-    Skips all DB and Redis calls if eligible_keys is already present and
-    non-empty — prevents redundant round trips on follow-up turns.
-    Returns None always; never short-circuits the agent.
-    """
-    state = callback_context.state.to_dict()
-    if state.get("eligible_keys"):
-        return None
-    session_context = validate_session_context(state)
-    pool = get_pool()
-    graph = await build_resolution_graph(pool, session_context.template_name)
-    resolution = await resolve_template(session_context)
-    eligible, _ = await _build_reachable_eligible(
-        graph, resolution, session_context, state
-    )
-    callback_context.state["eligible_keys"] = eligible
-    return None
+    return {
+        "restored": restored,
+        "message": f"Restored {restored} placeholder(s).",
+        "snapshot_cleared": snapshot_cleared,
+    }
 
 
 async def _classify_keys_tool(tool_context: ToolContext) -> dict[str, Any]:
     state = tool_context.state.to_dict()
     eligible_keys = state.get("eligible_keys", {})
-    result = await classify_keys(eligible_keys, state)
-    tool_context.state["tone_bearing_keys"] = result["tone_bearing"]
-    tool_context.state["structural_keys"] = result["structural"]
-    return result
+    return await classify_keys(eligible_keys, state)
 
 
 async def _suggest_tone_rewrites_tool(
-    target_intent: str, tool_context: ToolContext
+    target_intent: str,
+    tone_bearing_keys: dict[str, str] | None,
+    tool_context: ToolContext,
 ) -> dict[str, Any]:
-    result = await suggest_tone_rewrite(target_intent, tool_context.state.to_dict())
-    if "rewrite_prompt" in result:
-        tool_context.state["pending_suggest_rewrite"] = {
-            "suggestion_id": result["suggestion_id"],
-        }
+    if tone_bearing_keys is None:
+        raise MissingClassificationError()
+    result = await suggest_tone_rewrite(
+        target_intent,
+        tone_bearing_keys,
+        tool_context.state.to_dict(),
+    )
+    if "suggestion_id" in result:
+        tool_context.state["suggestion_id"] = result["suggestion_id"]
     return result
-
-
-async def _process_suggest_agent_response(
-    callback_context: CallbackContext,
-) -> Content | None:
-    """Parse SuggestAgent JSON output and write validated suggestions to session state."""
-    pending = callback_context.state.get("pending_suggest_rewrite")
-    if not pending:
-        return None
-
-    raw_text = _extract_agent_response_text(callback_context)
-    if not raw_text:
-        callback_context.state.pop("pending_suggest_rewrite", None)
-        return None
-
-    eligible = dict(callback_context.state.get("tone_bearing_keys", {}))
-    try:
-        finalized = _finalize_suggest_rewrites(
-            raw_text,
-            eligible,
-            pending["suggestion_id"],
-        )
-    except (json.JSONDecodeError, ValueError):
-        logger.warning(
-            "Failed to parse SuggestAgent rewrite response",
-            exc_info=True,
-        )
-        callback_context.state["suggestions"] = []
-        callback_context.state.pop("pending_suggest_rewrite", None)
-        return None
-
-    callback_context.state["suggestions"] = finalized["suggestions"]
-    callback_context.state["suggestion_id"] = finalized["suggestion_id"]
-    if finalized.get("discarded_keys"):
-        callback_context.state["discarded_keys"] = finalized["discarded_keys"]
-    callback_context.state.pop("pending_suggest_rewrite", None)
-    return None
 
 
 async def _apply_tone_suggestions_tool(
@@ -726,6 +739,10 @@ async def _apply_tone_suggestions_tool(
             "error": "missing_suggestion_id",
             "message": "Cannot apply tone suggestions without a valid suggestion_id in session state.",
         }
+    for item in suggestions:
+        item_suggestion_id = item.get("suggestion_id")
+        if item_suggestion_id and item_suggestion_id != suggestion_id:
+            raise SuggestionIdMismatchError(suggestion_id, item_suggestion_id)
     return await apply_tone_suggestions(suggestions, state)
 
 
@@ -771,24 +788,33 @@ def create_suggest_agent() -> LlmAgent:
         ),
         instruction="""
         You are the Suggest Agent. Call _suggest_tone_rewrites_tool with the user's
-        tone intent. Read candidate keys exclusively from session.state tone_bearing_keys.
-        Never apply changes — only return suggestions for user review.
+        tone intent and the tone_bearing_keys dict passed explicitly by the orchestrator.
+        Never apply changes — only produce suggestions for user review.
 
         When _suggest_tone_rewrites_tool returns a payload containing rewrite_prompt:
         1. The keys in rewrite_prompt are ordered by their reading sequence in the
-           email — treat them as a coherent set, not as independent strings.
+        email — treat them as a coherent set, not as independent strings.
         2. Reason over all keys together: the tone shift must feel consistent from
-           the first key to the last, as the same recipient reads them in sequence.
-        3. Emit your response as a JSON array only, with no preamble, no
-           explanation, and no markdown fences. Each object must have exactly
-           two fields: "key" (string) and "new_value" (string).
+        the first key to the last, as the same recipient reads them in sequence.
+        3. Generate a JSON array of objects with exactly two fields per object:
+        "key" (string) and "new_value" (string).
         4. Return ONLY keys from the eligible_keys list in the tool result.
         5. Do NOT copy the old value into new_value unchanged.
         6. Do NOT append tone labels, annotations, or comments to values.
-        7. Do NOT call any other tool or delegate to any other agent.
+        7. PRESERVE THE ORIGINAL MESSAGE PURPOSE AND MEANING. The rewrite must
+        communicate the same factual content, call-to-action, and intent as
+        the original — only the voice, tone, and phrasing may change. Do not
+        add new information, omit required details, or change what the email
+        is asking the recipient to do.
+        8. Write in the SAME PERSON AND REGISTER as the original (first person,
+        second person, etc.). If the original addresses "you", the rewrite
+        must too.
+        9. After generating JSON rewrites, call finalize_rewrites(rewrites=[...])
+        with the full list as the parameter. Do not emit the JSON as response
+        text. Do not proceed until finalize_rewrites has been called.
+        10. Do NOT call any other tool or delegate to any other agent.
         """,
-        tools=[_suggest_tone_rewrites_tool],
-        after_agent_callback=_process_suggest_agent_response,
+        tools=[_suggest_tone_rewrites_tool, finalize_rewrites],
     )
 
 
@@ -797,13 +823,15 @@ def create_apply_agent() -> LlmAgent:
         name="ApplyAgent",
         model=get_llm_model("TONE_SUGGESTION"),
         description=(
-            "Applies confirmed tone suggestions after explicit user confirmation, "
-            "capturing a pre-apply snapshot before any working copy writes."
+            "Applies confirmed tone suggestions after explicit user confirmation."
         ),
         instruction="""
-        You are the Apply Agent. Only run after the user explicitly confirms a
-        suggestion batch. Call apply_tone_suggestions with the confirmed suggestions.
-        session.state must contain a valid suggestion_id before you apply anything.
+        You are the Apply Agent. You are only invoked when the user has confirmed tone changes.
+        You MUST immediately call the tool named `_apply_tone_suggestions_tool` using the list 
+        of confirmed suggestions passed by the orchestrator.
+        
+        Do not explain what you are going to do. Execute `_apply_tone_suggestions_tool` 
+        and return the success or failure message directly to the user.
         """,
         tools=[_apply_tone_suggestions_tool],
     )
@@ -813,7 +841,7 @@ def create_undo_agent() -> LlmAgent:
     return LlmAgent(
         name="UndoAgent",
         model=get_llm_model("TONE_SUGGESTION"),
-        description="Restores the working copy from the pre-apply tone snapshot.",
+        description="Restores the working copy from the pre-suggestion tone snapshot.",
         instruction="""
         You are the Undo Agent. Call undo_tone_suggestions when the user wants to
         revert applied tone changes. If no snapshot exists, relay the returned
@@ -834,39 +862,38 @@ def create_tone_suggestion_subagent() -> LlmAgent:
         name="ToneSuggestionSubagent",
         model=get_llm_model("TONE_SUGGESTION"),
         description=_TONE_SUGGESTION_DESCRIPTION,
-        instruction="""
+        instruction=f"""
         You are the Tone Suggestion orchestrator. Delegate to specialist subagents
-        in the correct order and never call their tools directly yourself.
+        in the correct order and never call their tools directly yourself except
+        load_eligible_keys.
 
         ## Suggest flow (strict order)
-        1. Delegate to KeyClassifierAgent. eligible_keys is already populated in
-           session.state before this instruction runs.
-        2. KeyClassifierAgent populates tone_bearing_keys and structural_keys.
-           KeyClassifierAgent MUST run before SuggestAgent.
-        3. Delegate to SuggestAgent to generate rewrites from tone_bearing_keys only.
-           SuggestAgent calls _suggest_tone_rewrites_tool, then emits JSON rewrites
-           as its response. Validated suggestions and suggestion_id are written to
-           session.state automatically after SuggestAgent completes.
-        4. Present each suggestion with current and proposed values side by side.
-        5. Wait for explicit user confirmation before any apply step.
+        Step 0: Call load_eligible_keys(force_reload=True). If the result contains an
+        "error" key, relay the "message" value to the user as a plain sentence and stop.
+        Step 1: Delegate to KeyClassifierAgent.
+        Step 2: Read tone_bearing_keys from KeyClassifierAgent's tool return value.
+        Pass it explicitly to SuggestAgent via _suggest_tone_rewrites_tool's parameter.
+        Step 3: After SuggestAgent completes, read session.state["suggestions"] and
+        session.state["suggestion_id"].
+        Step 4: If snapshot_overwritten is true, prepend this warning: "{_SNAPSHOT_OVERWRITE_WARNING}"
+        Step 5: Present each suggestion (Old vs New) side by side.
+        Step 6: Wait for explicit user confirmation before any apply step.
 
-        ## Apply flow
-        6. Only after confirmation, delegate to ApplyAgent. ApplyAgent requires
-           suggestion_id in session.state and captures a snapshot before writing.
+        ## Apply flow (Handling Confirmations)
+        Step 7: If the user confirms ALL suggestions, delegate to ApplyAgent with the full list.
+        Step 8: PARTIAL CONFIRMATION: If the user asks to apply ONLY specific keys (e.g., "Apply only X and Y"), you MUST filter the session.state["suggestions"] list to include ONLY those keys, and pass that filtered list to the ApplyAgent. Do not ask for confirmation again.
+        Step 9: When a user confirms, you MUST immediately delegate to ApplyAgent. Do NOT reply with phrases like "I will apply this" or "Changes will be applied" without triggering the ApplyAgent.
 
         ## Undo flow
-        7. Delegate to UndoAgent at any time when the user asks to undo tone changes.
+        Step 10: Delegate to UndoAgent at any time when the user asks to undo tone changes.
 
         ## Behaviour rules
-        - Never rewrite structural keys — KeyClassifierAgent filters them out.
+        - Never rewrite structural keys.
         - Never apply suggestions without user confirmation and a valid suggestion_id.
-        - Snapshot writes MUST complete before any working copy writes during apply.
         - Never write to PostgreSQL.
-        - When a prior undo snapshot is overwritten during apply, inform the user.
         """,
-        before_agent_callback=_populate_eligible_keys,
         sub_agents=[KeyClassifierAgent, SuggestAgent, ApplyAgent, UndoAgent],
-        tools=[],
+        tools=[load_eligible_keys],
     )
 
 

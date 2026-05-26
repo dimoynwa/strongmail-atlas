@@ -26,3 +26,12 @@
 **Decision**: Introduce `MissingClassificationError` and `SuggestionIdMismatchError` with `to_payload()` methods.
 **Rationale**: Provides structured, user-facing error messages when expected state or parameters are missing or mismatched.
 **Alternatives considered**: Raising standard `ValueError` (rejected because it doesn't provide a clean payload for the orchestrator to relay).
+
+### 6. FIX-10 Audit: `services.resolve_template` return type
+**Finding**: Branch A — wraps shared `ResolutionResult` from `shared/resolution/resolver.py`.
+
+`template_assistant/services.py` imports and returns `ResolutionResult` directly, constructing it
+with `resolved_body`, `unresolvable`, and `resolved_keys`. Field names in
+`tone_suggestion_subagent.py` already match the shared type (`resolved_body`,
+`resolved_keys`). No `ServiceResolutionResult` dataclass is needed and no field renames
+are required.

@@ -13,7 +13,6 @@ from template_assistant.subagents.tone_suggestion_subagent import (
     _apply_structural_heuristics,
     _classify_keys_tool,
     classify_keys,
-    set_classifier_llm_fn,
 )
 
 
@@ -46,13 +45,6 @@ def _long_prose(suffix: str = "") -> str:
     )
 
 
-@pytest.fixture(autouse=True)
-def reset_classifier_llm():
-    set_classifier_llm_fn(None)
-    yield
-    set_classifier_llm_fn(None)
-
-
 @pytest.mark.asyncio
 async def test_stage1_structural_suffix():
     assert _apply_structural_heuristics("EN.LOGO_URL") is True
@@ -80,22 +72,28 @@ async def test_stage1_structural_substring():
 async def test_stage1_tone_bearing():
     assert _apply_structural_heuristics("EN.PARAGRAPH_1") is False
 
-    async def fail_if_called(_prompt: str) -> str:
+    async def fail_if_called(_keys: dict[str, str]) -> dict[str, str]:
         raise AssertionError("LLM should not be called for Stage 1 structural keys only")
 
-    set_classifier_llm_fn(fail_if_called)
-    result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=fail_if_called,
+    ):
+        result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
     assert result["stage1_structural_count"] == 0
     assert "EN.PARAGRAPH_1" not in result["structural"]
 
 
 @pytest.mark.asyncio
 async def test_stage2_llm_classification():
-    async def stub_llm(_prompt: str) -> str:
-        return json.dumps([{"key": "EN.PARAGRAPH_1", "role": "tone"}])
+    async def stub_llm(_keys: dict[str, str]) -> dict[str, str]:
+        return {"EN.PARAGRAPH_1": "tone"}
 
-    set_classifier_llm_fn(stub_llm)
-    result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=stub_llm,
+    ):
+        result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
     assert "EN.PARAGRAPH_1" in result["tone_bearing"]
     assert result["tone_bearing_count"] == 1
     assert result["stage2_structural_count"] == 0
@@ -103,27 +101,27 @@ async def test_stage2_llm_classification():
 
 @pytest.mark.asyncio
 async def test_stage2_hallucinated_key_discarded():
-    async def stub_llm(_prompt: str) -> str:
-        return json.dumps(
-            [
-                {"key": "EN.PARAGRAPH_1", "role": "tone"},
-                {"key": "EN.PHANTOM_KEY", "role": "tone"},
-            ]
-        )
+    async def stub_llm(_keys: dict[str, str]) -> dict[str, str]:
+        return {"EN.PARAGRAPH_1": "tone", "EN.PHANTOM_KEY": "tone"}
 
-    set_classifier_llm_fn(stub_llm)
-    result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=stub_llm,
+    ):
+        result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
     assert "EN.PHANTOM_KEY" not in result["tone_bearing"]
     assert "EN.PHANTOM_KEY" not in result["structural"]
 
 
 @pytest.mark.asyncio
 async def test_stage2_fallback_on_failure():
-    async def failing_llm(_prompt: str) -> str:
+    async def failing_llm(_keys: dict[str, str]) -> dict[str, str]:
         raise RuntimeError("LLM unavailable")
 
-    set_classifier_llm_fn(failing_llm)
     with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=failing_llm,
+    ), patch(
         "template_assistant.subagents.tone_suggestion_subagent.logger"
     ) as mock_logger:
         result = await classify_keys({"EN.PARAGRAPH_1": _long_prose()}, {})
@@ -135,13 +133,16 @@ async def test_stage2_fallback_on_failure():
 async def test_classify_keys_empty_input():
     llm_called = False
 
-    async def track_llm(_prompt: str) -> str:
+    async def track_llm(_keys: dict[str, str]) -> dict[str, str]:
         nonlocal llm_called
         llm_called = True
-        return "[]"
+        return {}
 
-    set_classifier_llm_fn(track_llm)
-    result = await classify_keys({}, {})
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=track_llm,
+    ):
+        result = await classify_keys({}, {})
     assert result["tone_bearing_count"] == 0
     assert result["stage1_structural_count"] == 0
     assert llm_called is False
@@ -151,19 +152,22 @@ async def test_classify_keys_empty_input():
 async def test_classify_keys_all_structural():
     llm_called = False
 
-    async def track_llm(_prompt: str) -> str:
+    async def track_llm(_keys: dict[str, str]) -> dict[str, str]:
         nonlocal llm_called
         llm_called = True
-        return "[]"
+        return {}
 
-    set_classifier_llm_fn(track_llm)
-    result = await classify_keys(
-        {
-            "EN.LOGO_URL": "https://example.com/logo.png",
-            "EN.FOOTER_COPYRIGHT": _long_prose(),
-        },
-        {},
-    )
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=track_llm,
+    ):
+        result = await classify_keys(
+            {
+                "EN.LOGO_URL": "https://example.com/logo.png",
+                "EN.FOOTER_COPYRIGHT": _long_prose(),
+            },
+            {},
+        )
     assert result["tone_bearing_count"] == 0
     assert result["stage1_structural_count"] == 2
     assert llm_called is False
@@ -171,10 +175,9 @@ async def test_classify_keys_all_structural():
 
 @pytest.mark.asyncio
 async def test_state_keys_written():
-    async def stub_llm(_prompt: str) -> str:
-        return json.dumps([{"key": "EN.PARAGRAPH_1", "role": "tone"}])
+    async def stub_llm(_keys: dict[str, str]) -> dict[str, str]:
+        return {"EN.PARAGRAPH_1": "tone"}
 
-    set_classifier_llm_fn(stub_llm)
     state = FakeToolState(
         {
             "eligible_keys": {
@@ -184,8 +187,12 @@ async def test_state_keys_written():
         }
     )
     ctx = FakeToolContext(state=state)
-    await _classify_keys_tool(ctx)  # type: ignore[arg-type]
-    assert "tone_bearing_keys" in state.data
-    assert "structural_keys" in state.data
-    assert "EN.PARAGRAPH_1" in state.data["tone_bearing_keys"]
-    assert "EN.LOGO_URL" in state.data["structural_keys"]
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=stub_llm,
+    ):
+        result = await _classify_keys_tool(ctx)  # type: ignore[arg-type]
+    assert "tone_bearing" in result
+    assert "structural" in result
+    assert "tone_bearing_keys" not in state.data
+    assert "structural_keys" not in state.data

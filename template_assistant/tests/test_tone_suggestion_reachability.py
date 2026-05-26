@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +12,7 @@ from template_assistant.context import validate_session_context
 from template_assistant.services import working_copy_key
 from template_assistant.subagents.tone_suggestion_subagent import (
     _build_reachable_eligible,
-    _finalize_suggest_rewrites,
+    finalize_rewrites,
     suggest_tone_rewrite,
 )
 from template_assistant.tests.test_resolution_subagent import _seed_template
@@ -28,6 +29,22 @@ def _eligible_key(name: str) -> str:
 
 def _long_text(suffix: str = "") -> str:
     return f"This is a long enough placeholder value for tone rewrite testing.{suffix}"
+
+
+@dataclass
+class FakeToolState:
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.data
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.data[key] = value
+
+
+@dataclass
+class FakeToolContext:
+    state: FakeToolState
 
 
 @pytest.mark.asyncio
@@ -53,25 +70,28 @@ async def test_unreachable_graph_keys_excluded_from_suggestions(
     eligible, _ = await _build_reachable_eligible(
         graph, resolution, session_context, session_state
     )
-    session_state["tone_bearing_keys"] = eligible
-
-    llm_payload = json.dumps(
-        [
-            {"key": used_key, "new_value": _long_text(" Rewritten.")},
-            {"key": orphan_key, "new_value": _long_text(" Should not appear.")},
-        ]
-    )
 
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", eligible, session_state)
 
-    result = _finalize_suggest_rewrites(
-        llm_payload,
-        eligible,
-        tool_result["suggestion_id"],
+    fin_ctx = FakeToolContext(
+        state=FakeToolState(
+            {
+                **session_state,
+                "eligible_keys": eligible,
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
+    )
+    result = await finalize_rewrites(
+        [
+            {"key": used_key, "new_value": _long_text(" Rewritten.")},
+            {"key": orphan_key, "new_value": _long_text(" Should not appear.")},
+        ],
+        fin_ctx,  # type: ignore[arg-type]
     )
 
     suggestion_keys = {item["key"] for item in result["suggestions"]}
@@ -138,22 +158,25 @@ async def test_transitive_prose_eligible_bare_token_filtered(
     eligible, _ = await _build_reachable_eligible(
         graph, resolution, session_context, session_state
     )
-    session_state["tone_bearing_keys"] = eligible
-
-    llm_payload = json.dumps(
-        [{"key": greeting_key, "new_value": rewritten_greeting}]
-    )
 
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", eligible, session_state)
 
-    result = _finalize_suggest_rewrites(
-        llm_payload,
-        eligible,
-        tool_result["suggestion_id"],
+    fin_ctx = FakeToolContext(
+        state=FakeToolState(
+            {
+                **session_state,
+                "eligible_keys": eligible,
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
+    )
+    result = await finalize_rewrites(
+        [{"key": greeting_key, "new_value": rewritten_greeting}],
+        fin_ctx,  # type: ignore[arg-type]
     )
 
     suggestion_keys = {item["key"] for item in result["suggestions"]}

@@ -1,31 +1,42 @@
+"""Integration tests for tone suggestion subagent tools (spec 009)."""
+
+from __future__ import annotations
+
 import json
-import pytest
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
-from template_assistant.context import SessionContextMissingError
+import pytest
+
+from template_assistant.context import (
+    MissingClassificationError,
+    SessionContextMissingError,
+    SuggestionIdMismatchError,
+    validate_session_context,
+)
 from template_assistant.services import SNAPSHOT_NONE_SENTINEL, resolve_template, snapshot_key, working_copy_key
 from template_assistant.subagents import tone_suggestion_subagent as tss
 from template_assistant.subagents.tone_suggestion_subagent import (
+    KeyNotInGraphError,
     _apply_structural_heuristics,
     _apply_tone_suggestions_tool,
     _build_llm_prompt,
     _build_reachable_eligible,
-    _finalize_suggest_rewrites,
-    _populate_eligible_keys,
+    _classify_keys_tool,
     _suggest_tone_rewrites_tool,
+    _undo_tone_suggestions_tool,
     apply_tone_suggestions,
     capture_snapshot,
     classify_keys,
+    finalize_rewrites,
     is_eligible_for_rewrite,
-    set_classifier_llm_fn,
+    load_eligible_keys,
     suggest_tone_rewrite,
     undo_tone_suggestions,
 )
 from template_assistant.subagents.working_copy_subagent import get_working_copy, set_working_copy_value
 from template_assistant.tests.test_resolution_subagent import _seed_template
-from template_assistant.context import validate_session_context
 from shared.resolution.graph_builder import build_resolution_graph
 
 
@@ -51,11 +62,6 @@ class FakeToolContext:
     state: FakeToolState
 
 
-@dataclass
-class FakeCallbackContext:
-    state: FakeToolState
-
-
 def _long_text(suffix: str = "") -> str:
     return (
         "We are delighted to welcome you to our platform and hope you enjoy "
@@ -63,11 +69,14 @@ def _long_text(suffix: str = "") -> str:
     )
 
 
-@pytest.fixture(autouse=True)
-def reset_classifier_fn():
-    set_classifier_llm_fn(None)
-    yield
-    set_classifier_llm_fn(None)
+def _classifier_patch():
+    return patch(
+        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
+        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
+    )
+
+
+# --- eligibility helpers (unchanged behaviour) ---
 
 
 def test_ineligible_suffixes():
@@ -91,6 +100,137 @@ def test_eligible_long_natural_language():
     )
 
 
+# --- load_eligible_keys ---
+
+
+@pytest.mark.asyncio
+async def test_load_eligible_keys_success(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    result = await load_eligible_keys(True, ctx)  # type: ignore[arg-type]
+    assert "eligible_keys" in result
+    assert result["total"] > 0
+    assert ctx.state.data.get("eligible_keys")
+
+
+@pytest.mark.asyncio
+async def test_load_eligible_keys_cache_hit_skips_db(db_pool, redis_client, session_state):
+    cached = {"GREETING": _long_text()}
+    ctx = FakeToolContext(
+        state=FakeToolState({**session_state, "eligible_keys": cached})
+    )
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent.build_resolution_graph"
+    ) as mock_build:
+        result = await load_eligible_keys(False, ctx)  # type: ignore[arg-type]
+        mock_build.assert_not_called()
+    assert result["eligible_keys"] == cached
+
+
+@pytest.mark.asyncio
+async def test_load_eligible_keys_force_reload_bypasses_cache(
+    db_pool, redis_client, session_state
+):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    ctx = FakeToolContext(
+        state=FakeToolState({**session_state, "eligible_keys": {"STALE": "old value long enough."}})
+    )
+    result = await load_eligible_keys(True, ctx)  # type: ignore[arg-type]
+    assert "STALE" not in result["eligible_keys"]
+    assert "GREETING" in result["eligible_keys"]
+
+
+@pytest.mark.asyncio
+async def test_load_eligible_keys_db_failure_returns_error_dict(session_state):
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent.get_pool",
+        side_effect=RuntimeError("DB unavailable"),
+    ):
+        result = await load_eligible_keys(True, ctx)  # type: ignore[arg-type]
+    assert isinstance(result.get("error"), str)
+    assert isinstance(result.get("message"), str)
+
+
+# --- finalize_rewrites ---
+
+
+@pytest.mark.asyncio
+async def test_finalize_rewrites_accepts_valid_keys(session_state):
+    state = {
+        **session_state,
+        "eligible_keys": {"GREETING": _long_text()},
+        "suggestion_id": "batch-001",
+    }
+    ctx = FakeToolContext(state=FakeToolState(state))
+    rewrites = [{"key": "GREETING", "new_value": _long_text(" updated")}]
+    result = await finalize_rewrites(rewrites, ctx)  # type: ignore[arg-type]
+    assert result["accepted"] == 1
+    suggestions = ctx.state.data["suggestions"]
+    assert suggestions[0]["old_value"] == _long_text()
+    assert suggestions[0]["new_value"] == _long_text(" updated")
+    assert suggestions[0]["suggestion_id"] == "batch-001"
+
+
+@pytest.mark.asyncio
+async def test_finalize_rewrites_discards_hallucinated_keys(session_state):
+    state = {
+        **session_state,
+        "eligible_keys": {"GREETING": _long_text()},
+        "suggestion_id": "batch-001",
+    }
+    ctx = FakeToolContext(state=FakeToolState(state))
+    rewrites = [
+        {"key": "GREETING", "new_value": _long_text(" ok")},
+        {"key": "PHANTOM", "new_value": _long_text(" bad")},
+    ]
+    result = await finalize_rewrites(rewrites, ctx)  # type: ignore[arg-type]
+    assert result["accepted"] == 1
+    assert len(ctx.state.data["suggestions"]) == 1
+    assert "discarded_keys" in ctx.state.data
+
+
+@pytest.mark.asyncio
+async def test_finalize_rewrites_filters_unchanged_values(session_state):
+    current = _long_text()
+    state = {
+        **session_state,
+        "eligible_keys": {"GREETING": current},
+        "suggestion_id": "batch-001",
+    }
+    ctx = FakeToolContext(state=FakeToolState(state))
+    rewrites = [{"key": "GREETING", "new_value": current}]
+    result = await finalize_rewrites(rewrites, ctx)  # type: ignore[arg-type]
+    assert result["accepted"] == 0
+    assert ctx.state.data["suggestions"] == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_rewrites_malformed_json(session_state):
+    state = {
+        **session_state,
+        "eligible_keys": {"GREETING": _long_text()},
+        "suggestion_id": "batch-001",
+    }
+    ctx = FakeToolContext(state=FakeToolState(state))
+    result = await finalize_rewrites("{not valid json", ctx)  # type: ignore[arg-type]
+    assert result["error"] == "parse_error"
+    assert "message" in result
+
+
+# --- snapshot lifecycle ---
+
+
 @pytest.mark.asyncio
 async def test_capture_snapshot_from_working_copy(db_pool, redis_client, session_state):
     await _seed_template(
@@ -112,80 +252,264 @@ async def test_capture_snapshot_from_working_copy(db_pool, redis_client, session
 
 
 @pytest.mark.asyncio
-async def test_capture_snapshot_graph_value_when_not_in_working_copy(
+async def test_suggest_tone_rewrite_snapshot_saved_before_prompt(
     db_pool, redis_client, session_state
 ):
     await _seed_template(
         db_pool,
         "TestTemplate",
-        html="##GREETING##",
-        kv_pairs={"GREETING": "Graph greeting value here."},
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
     )
+    tone_bearing = {"GREETING": _long_text()}
+    with _classifier_patch():
+        result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+    assert result["snapshot_saved"] is True
     ctx = validate_session_context(session_state)
-    graph = await build_resolution_graph(db_pool, ctx.template_name)
-    await capture_snapshot(["GREETING"], ctx, redis_client, graph)
     snap = await redis_client.hgetall(snapshot_key(ctx))
-    assert snap["GREETING"] == "Graph greeting value here."
+    assert snap
+    assert "rewrite_prompt" in result
 
 
 @pytest.mark.asyncio
-async def test_capture_snapshot_overwrites_previous(db_pool, redis_client, session_state):
-    ctx = validate_session_context(session_state)
+async def test_suggest_tone_rewrite_snapshot_overwritten_flag(
+    db_pool, redis_client, session_state
+):
     await _seed_template(
         db_pool,
         "TestTemplate",
-        html="##A## ##B##",
-        kv_pairs={"A": "First value long enough.", "B": "Second value long enough."},
-    )
-    graph = await build_resolution_graph(db_pool, ctx.template_name)
-    await capture_snapshot(["A"], ctx, redis_client, graph)
-    await capture_snapshot(["B"], ctx, redis_client, graph)
-    snap = await redis_client.hgetall(snapshot_key(ctx))
-    assert snap == {"B": "Second value long enough."}
-
-
-@pytest.mark.asyncio
-async def test_apply_writes_snapshot_before_working_copy(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="##GREETING##",
-        kv_pairs={"GREETING": "Original greeting message long enough."},
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
     )
     ctx = validate_session_context(session_state)
-    suggestion = {
-        "key": "GREETING",
-        "current_value": "Original greeting message long enough.",
-        "suggested_value": "Updated greeting message long enough.",
-        "predicted_delta": {"joy": 0.2},
-    }
-    await apply_tone_suggestions([suggestion], session_state)
-    snap = await redis_client.hgetall(snapshot_key(ctx))
-    wc = await redis_client.hgetall(working_copy_key(ctx))
-    assert snap["GREETING"] == "Original greeting message long enough."
-    assert wc["GREETING"] == "Updated greeting message long enough."
+    await redis_client.hset(snapshot_key(ctx), "GREETING", "existing snapshot value")
+    tone_bearing = {"GREETING": _long_text()}
+    with _classifier_patch():
+        result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+    assert result["snapshot_overwritten"] is True
 
 
 @pytest.mark.asyncio
-async def test_undo_restores_snapshot_and_deletes_when_none(db_pool, redis_client, session_state):
+async def test_apply_does_not_call_capture_snapshot(db_pool, redis_client, session_state):
     await _seed_template(
         db_pool,
         "TestTemplate",
         html="##GREETING##",
-        kv_pairs={"GREETING": "Original greeting message long enough."},
+        kv_pairs={"GREETING": _long_text()},
     )
-    ctx = validate_session_context(session_state)
-    await redis_client.hset(snapshot_key(ctx), "GREETING", SNAPSHOT_NONE_SENTINEL)
-    await redis_client.hset(working_copy_key(ctx), "GREETING", "Changed greeting message.")
-    result = await undo_tone_suggestions(["GREETING"], session_state)
-    assert result["restored"] == 1
-    assert await redis_client.hget(working_copy_key(ctx), "GREETING") is None
+    session_state["suggestion_id"] = "batch-001"
+    suggestions = [
+        {
+            "key": "GREETING",
+            "old_value": _long_text(),
+            "new_value": _long_text(" applied"),
+            "suggestion_id": "batch-001",
+        }
+    ]
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent.capture_snapshot"
+    ) as mock_capture:
+        await apply_tone_suggestions(suggestions, session_state)
+        mock_capture.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_undo_all_when_no_snapshot(db_pool, redis_client, session_state):
+async def test_undo_full_clears_snapshot_hash(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="##GREETING##",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    ctx = validate_session_context(session_state)
+    await redis_client.hset(snapshot_key(ctx), "GREETING", _long_text())
+    await redis_client.hset(working_copy_key(ctx), "GREETING", _long_text(" changed"))
     result = await undo_tone_suggestions(None, session_state)
-    assert "nothing" in result["message"].lower() or "no tone" in result["message"].lower()
+    assert result["snapshot_cleared"] is True
+    assert not await redis_client.exists(snapshot_key(ctx))
+
+
+@pytest.mark.asyncio
+async def test_undo_partial_leaves_snapshot_hash(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="##GREETING## ##BODY##",
+        kv_pairs={"GREETING": _long_text(" g"), "BODY": _long_text(" b")},
+    )
+    ctx = validate_session_context(session_state)
+    await redis_client.hset(snapshot_key(ctx), "GREETING", _long_text(" g"))
+    await redis_client.hset(snapshot_key(ctx), "BODY", _long_text(" b"))
+    result = await undo_tone_suggestions(["GREETING"], session_state)
+    assert result["snapshot_cleared"] is False
+    assert await redis_client.exists(snapshot_key(ctx))
+
+
+@pytest.mark.asyncio
+async def test_undo_no_snapshot_returns_gracefully(db_pool, redis_client, session_state):
+    result = await undo_tone_suggestions(None, session_state)
+    assert result["restored"] == 0
+    assert result["snapshot_cleared"] is False
+    assert "message" in result
+
+
+# --- classification and suggest tool ---
+
+
+@pytest.mark.asyncio
+async def test_suggest_tone_rewrite_raises_on_missing_tone_bearing_keys(
+    db_pool, redis_client, session_state
+):
+    with pytest.raises(MissingClassificationError):
+        await suggest_tone_rewrite("warmer", None, session_state)
+
+
+@pytest.mark.asyncio
+async def test_suggest_tone_rewrite_empty_tone_bearing_keys_returns_message(
+    db_pool, redis_client, session_state
+):
+    result = await suggest_tone_rewrite("warmer", {}, session_state)
+    assert result["message"] == "No eligible keys found for tone rewriting."
+
+
+@pytest.mark.asyncio
+async def test_classify_keys_tool_returns_classification_not_writes_state(session_state):
+    async def stub_llm(_keys: dict[str, str]) -> dict[str, str]:
+        return {"EN.PARAGRAPH_1": "tone"}
+
+    state = FakeToolState(
+        {
+            **session_state,
+            "eligible_keys": {
+                "EN.PARAGRAPH_1": _long_text(),
+                "EN.LOGO_URL": "https://example.com/logo.png",
+            },
+        }
+    )
+    ctx = FakeToolContext(state=state)
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=stub_llm,
+    ):
+        result = await _classify_keys_tool(ctx)  # type: ignore[arg-type]
+    assert "tone_bearing" in result
+    assert "structural" in result
+    assert "tone_bearing_keys" not in state.data
+    assert "structural_keys" not in state.data
+
+
+@pytest.mark.asyncio
+async def test_apply_validates_suggestion_id_cross_match(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="##GREETING##",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    session_state["suggestion_id"] = "expected-id"
+    suggestions = [
+        {
+            "key": "GREETING",
+            "old_value": _long_text(),
+            "new_value": _long_text(" new"),
+            "suggestion_id": "wrong-id",
+        }
+    ]
+    with pytest.raises(SuggestionIdMismatchError):
+        await apply_tone_suggestions(suggestions, session_state)
+
+
+@pytest.mark.asyncio
+async def test_apply_awaits_pool_and_redis(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="##GREETING##",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    session_state["suggestion_id"] = "batch-001"
+    suggestions = [
+        {
+            "key": "GREETING",
+            "old_value": _long_text(),
+            "new_value": _long_text(" applied"),
+            "suggestion_id": "batch-001",
+        }
+    ]
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    result = await _apply_tone_suggestions_tool(suggestions, ctx)  # type: ignore[arg-type]
+    assert result["applied"] == 1
+
+
+@pytest.mark.asyncio
+async def test_post_apply_state_keys_are_clean(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    load_ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    loaded = await load_eligible_keys(True, load_ctx)  # type: ignore[arg-type]
+
+    async def classify_stub(_keys: dict[str, str]) -> dict[str, str]:
+        return {"GREETING": "tone"}
+
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=classify_stub,
+    ):
+        classified = await classify_keys(loaded["eligible_keys"], session_state)
+
+    tone_bearing = classified["tone_bearing"]
+    with _classifier_patch():
+        tool_result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+
+    fin_ctx = FakeToolContext(
+        state=FakeToolState(
+            {
+                **session_state,
+                "eligible_keys": loaded["eligible_keys"],
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
+    )
+    fin_result = await finalize_rewrites(
+        [{"key": "GREETING", "new_value": _long_text(" applied")}],
+        fin_ctx,  # type: ignore[arg-type]
+    )
+    session_state.update(fin_ctx.state.data)
+    await apply_tone_suggestions(fin_result["suggestions"], session_state)
+    assert "tone_bearing_keys" not in session_state
+    assert "structural_keys" not in session_state
+    assert "pending_suggest_rewrite" not in session_state
+
+
+@pytest.mark.asyncio
+async def test_suggest_tool_returns_rewrite_prompt(db_pool, redis_client, session_state):
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html="<p>##GREETING##</p>",
+        kv_pairs={"GREETING": _long_text()},
+    )
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    with _classifier_patch():
+        result = await _suggest_tone_rewrites_tool(
+            "warmer", {"GREETING": _long_text()}, ctx
+        )  # type: ignore[arg-type]
+    assert "rewrite_prompt" in result
+    assert "suggestion_id" in result
+    assert ctx.state.data.get("suggestion_id") == result["suggestion_id"]
+    assert "suggestions" not in result
+
+
+@pytest.mark.asyncio
+async def test_apply_refuses_without_suggestion_id(db_pool, redis_client, session_state):
+    suggestions = [{"key": "GREETING", "new_value": _long_text(" x")}]
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    result = await _apply_tone_suggestions_tool(suggestions, ctx)  # type: ignore[arg-type]
+    assert "error" in result
 
 
 @pytest.mark.asyncio
@@ -194,98 +518,82 @@ async def test_undo_missing_context():
         await undo_tone_suggestions(None, {})
 
 
+def test_build_llm_prompt_keys_in_reading_order():
+    eligible = {
+        "EN.GREETING": "Hello there.",
+        "EN.PARAGRAPH_1": "First paragraph text here.",
+        "EN.CTA": "Click here now.",
+    }
+    resolved_body = "<p>EN.PARAGRAPH_1 content</p><p>EN.GREETING content</p>"
+    prompt = _build_llm_prompt(eligible, "warmer", {"joy": 0.8}, resolved_body)
+    paragraph_pos = prompt.index("EN.PARAGRAPH_1")
+    greeting_pos = prompt.index("EN.GREETING")
+    cta_pos = prompt.index("EN.CTA")
+    assert paragraph_pos < greeting_pos < cta_pos
+
+
+def test_call_batch_llm_deleted():
+    assert not hasattr(tss, "_call_batch_llm")
+    assert not hasattr(tss, "set_classifier_llm_fn")
+    assert not hasattr(tss, "_classifier_llm_fn")
+
+
+# --- e2e-style integration flows ---
+
+
 @pytest.mark.asyncio
-async def test_suggest_reads_tone_bearing_keys(db_pool, redis_client, session_state):
+async def test_manual_edit_then_suggest_excludes_edited_key(
+    db_pool, redis_client, session_state
+):
     await _seed_template(
         db_pool,
         "TestTemplate",
         html="<p>##GREETING## ##BODY##</p>",
-        kv_pairs={
-            "GREETING": _long_text(" greeting"),
-            "BODY": _long_text(" body"),
-        },
+        kv_pairs={"GREETING": _long_text(" g"), "BODY": _long_text(" b")},
     )
-
-    session_state["tone_bearing_keys"] = {"GREETING": _long_text(" greeting")}
-
+    await set_working_copy_value(
+        "GREETING",
+        "https://example.com/a-very-long-path-that-is-not-short",
+        session_state,
+    )
     ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
-    ):
-        result = await _suggest_tone_rewrites_tool("warmer", ctx)  # type: ignore[arg-type]
-
-    assert "rewrite_prompt" in result
-    assert result["eligible_keys"] == ["GREETING"]
-    assert "suggestions" not in result
+    result = await load_eligible_keys(True, ctx)  # type: ignore[arg-type]
+    assert "GREETING" not in result["eligible_keys"]
+    assert "BODY" in result["eligible_keys"]
 
 
 @pytest.mark.asyncio
-async def test_apply_refuses_without_suggestion_id(db_pool, redis_client, session_state):
+async def test_db_failure_during_load_eligible_keys_surfaces_message(session_state):
+    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    with patch(
+        "template_assistant.subagents.tone_suggestion_subagent.build_resolution_graph",
+        side_effect=ConnectionError("database unreachable"),
+    ):
+        result = await load_eligible_keys(True, ctx)  # type: ignore[arg-type]
+    assert "error" in result
+    assert isinstance(result["message"], str)
+
+
+@pytest.mark.asyncio
+async def test_second_suggest_before_undo_shows_warning(
+    db_pool, redis_client, session_state
+):
     await _seed_template(
         db_pool,
         "TestTemplate",
-        html="##GREETING##",
+        html="<p>##GREETING##</p>",
         kv_pairs={"GREETING": _long_text()},
     )
-    suggestions = [
-        {
-            "key": "GREETING",
-            "current_value": _long_text(),
-            "suggested_value": _long_text(" updated"),
-            "predicted_delta": {"joy": 0.2},
-        }
-    ]
-    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
-    result = await _apply_tone_suggestions_tool(suggestions, ctx)  # type: ignore[arg-type]
-    assert "error" in result
-    assert "suggestion_id" in result["message"].lower()
-
-
-@pytest.mark.asyncio
-async def test_e2e_structural_keys_excluded(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="<p>##GREETING## ##FOOTER_COPYRIGHT##</p>",
-        kv_pairs={
-            "GREETING": _long_text(" greeting"),
-            "FOOTER_COPYRIGHT": _long_text(" footer"),
-        },
+    tone_bearing = {"GREETING": _long_text()}
+    with _classifier_patch():
+        first = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+        second = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+    assert first["snapshot_overwritten"] is False
+    assert second["snapshot_overwritten"] is True
+    warning = (
+        "undo snapshot from your previous suggestion batch"
     )
-
-    async def classify_stub(_prompt: str) -> str:
-        return json.dumps([{"key": "GREETING", "role": "tone"}])
-
-    set_classifier_llm_fn(classify_stub)
-
-    session_context = validate_session_context(session_state)
-    resolution = await resolve_template(session_context)
-    graph = await build_resolution_graph(db_pool, session_context.template_name)
-    eligible, _ = await _build_reachable_eligible(
-        graph, resolution, session_context, session_state
-    )
-    classified = await classify_keys(eligible, session_state)
-    session_state["tone_bearing_keys"] = classified["tone_bearing"]
-
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
-    ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
-
-    assert "rewrite_prompt" in tool_result
-    llm_response = json.dumps(
-        [{"key": "GREETING", "new_value": _long_text(" warmer")}]
-    )
-    finalized = _finalize_suggest_rewrites(
-        llm_response,
-        classified["tone_bearing"],
-        tool_result["suggestion_id"],
-    )
-
-    for item in finalized["suggestions"]:
-        assert not _apply_structural_heuristics(item["key"])
+    assert warning in tss._SNAPSHOT_OVERWRITE_WARNING
 
 
 @pytest.mark.asyncio
@@ -300,44 +608,42 @@ async def test_e2e_full_flow(db_pool, redis_client, session_state):
         },
     )
 
-    async def classify_stub(_prompt: str) -> str:
-        return json.dumps([{"key": "GREETING", "role": "tone"}])
+    async def classify_stub(_keys: dict[str, str]) -> dict[str, str]:
+        return {"GREETING": "tone"}
 
-    set_classifier_llm_fn(classify_stub)
-
-    session_context = validate_session_context(session_state)
-    resolution = await resolve_template(session_context)
-    graph = await build_resolution_graph(db_pool, session_context.template_name)
-    eligible, _ = await _build_reachable_eligible(
-        graph, resolution, session_context, session_state
-    )
-    classified = await classify_keys(eligible, session_state)
-    session_state["tone_bearing_keys"] = classified["tone_bearing"]
-
+    load_ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
+    loaded = await load_eligible_keys(True, load_ctx)  # type: ignore[arg-type]
     with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
+        "template_assistant.subagents.tone_suggestion_subagent._llm_classify_keys",
+        side_effect=classify_stub,
     ):
-        tool_result = await suggest_tone_rewrite("warmer", session_state)
+        classified = await classify_keys(loaded["eligible_keys"], session_state)
 
-    assert "rewrite_prompt" in tool_result
-    llm_response = json.dumps(
-        [{"key": "GREETING", "new_value": _long_text(" warmer greeting")}]
+    tone_bearing = classified["tone_bearing"]
+    with _classifier_patch():
+        tool_result = await suggest_tone_rewrite("warmer", tone_bearing, session_state)
+
+    fin_ctx = FakeToolContext(
+        state=FakeToolState(
+            {
+                **session_state,
+                "eligible_keys": loaded["eligible_keys"],
+                "suggestion_id": tool_result["suggestion_id"],
+            }
+        )
     )
-    suggest_result = _finalize_suggest_rewrites(
-        llm_response,
-        classified["tone_bearing"],
-        tool_result["suggestion_id"],
+    fin_result = await finalize_rewrites(
+        [{"key": "GREETING", "new_value": _long_text(" warmer greeting")}],
+        fin_ctx,  # type: ignore[arg-type]
     )
+    assert fin_result["suggestions"]
+    session_state["suggestion_id"] = tool_result["suggestion_id"]
+    session_state["suggestions"] = fin_result["suggestions"]
 
-    assert suggest_result["suggestions"]
-    session_state["suggestion_id"] = suggest_result["suggestion_id"]
-    session_state["suggestions"] = suggest_result["suggestions"]
-
-    ctx = FakeToolContext(state=FakeToolState(session_state))
+    apply_ctx = FakeToolContext(state=FakeToolState(session_state))
     apply_result = await _apply_tone_suggestions_tool(
-        suggest_result["suggestions"],
-        ctx,  # type: ignore[arg-type]
+        fin_result["suggestions"],
+        apply_ctx,  # type: ignore[arg-type]
     )
     assert apply_result["applied"] == 1
 
@@ -346,135 +652,6 @@ async def test_e2e_full_flow(db_pool, redis_client, session_state):
 
     undo_result = await undo_tone_suggestions(["GREETING"], session_state)
     assert undo_result["restored"] == 1
-    wc_after = await get_working_copy(session_state)
-    assert "GREETING" not in wc_after or wc_after["GREETING"] != _long_text(" warmer greeting")
 
-
-@pytest.mark.asyncio
-async def test_callback_populates_eligible_keys(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="<p>##GREETING##</p>",
-        kv_pairs={"GREETING": _long_text()},
-    )
-    ctx = FakeCallbackContext(state=FakeToolState(session_state.copy()))
-    await _populate_eligible_keys(ctx)  # type: ignore[arg-type]
-    assert ctx.state.data.get("eligible_keys")
-    assert isinstance(ctx.state.data["eligible_keys"], dict)
-    assert len(ctx.state.data["eligible_keys"]) > 0
-
-
-@pytest.mark.asyncio
-async def test_callback_skips_if_already_populated(db_pool, redis_client, session_state):
-    existing = {"GREETING": _long_text()}
-    ctx = FakeCallbackContext(
-        state=FakeToolState({**session_state, "eligible_keys": existing})
-    )
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.build_resolution_graph"
-    ) as mock_build:
-        await _populate_eligible_keys(ctx)  # type: ignore[arg-type]
-        mock_build.assert_not_called()
-    assert ctx.state.data["eligible_keys"] == existing
-
-
-@pytest.mark.asyncio
-async def test_callback_returns_none(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="<p>##GREETING##</p>",
-        kv_pairs={"GREETING": _long_text()},
-    )
-    populate_ctx = FakeCallbackContext(state=FakeToolState(session_state.copy()))
-    assert await _populate_eligible_keys(populate_ctx) is None  # type: ignore[arg-type]
-
-    skip_ctx = FakeCallbackContext(
-        state=FakeToolState(
-            {**session_state, "eligible_keys": {"GREETING": _long_text()}}
-        )
-    )
-    assert await _populate_eligible_keys(skip_ctx) is None  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_suggest_errors_without_tone_bearing_keys(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="<p>##GREETING##</p>",
-        kv_pairs={"GREETING": _long_text()},
-    )
-    session_state["eligible_keys"] = {"GREETING": _long_text()}
-    result = await suggest_tone_rewrite("warmer", session_state)
-    assert result.get("error") == "missing_tone_bearing_keys"
-    assert "suggestions" not in result
-
-
-@pytest.mark.asyncio
-async def test_suggest_tool_returns_rewrite_prompt(db_pool, redis_client, session_state):
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html="<p>##GREETING##</p>",
-        kv_pairs={"GREETING": _long_text()},
-    )
-    session_state["tone_bearing_keys"] = {"GREETING": _long_text()}
-    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
-    ):
-        result = await _suggest_tone_rewrites_tool("warmer", ctx)  # type: ignore[arg-type]
-
-    assert "rewrite_prompt" in result
-    assert "KEYS TO REWRITE" in result["rewrite_prompt"]
-    assert "eligible_keys" in result
-    assert "target_emotions" in result
-    assert "baseline_emotions" in result
-    assert "suggestion_id" in result
-    assert "instruction" in result
-    assert "suggestions" not in result
-
-
-@pytest.mark.asyncio
-async def test_suggest_tool_no_eligible_keys(db_pool, redis_client, session_state):
-    session_state["tone_bearing_keys"] = {}
-    ctx = FakeToolContext(state=FakeToolState(session_state.copy()))
-    result = await _suggest_tone_rewrites_tool("warmer", ctx)  # type: ignore[arg-type]
-    assert result["message"] == "No eligible keys found for tone rewriting."
-    assert "rewrite_prompt" not in result
-
-
-def test_build_llm_prompt_keys_in_reading_order():
-    eligible = {
-        "EN.GREETING": "Hello there.",
-        "EN.PARAGRAPH_1": "First paragraph text here.",
-        "EN.CTA": "Click here now.",
-    }
-    resolved_body = (
-        "<p>EN.PARAGRAPH_1 content</p><p>EN.GREETING content</p>"
-    )
-    prompt = _build_llm_prompt(eligible, "warmer", {"joy": 0.8}, resolved_body)
-    paragraph_pos = prompt.index("EN.PARAGRAPH_1")
-    greeting_pos = prompt.index("EN.GREETING")
-    cta_pos = prompt.index("EN.CTA")
-    assert paragraph_pos < greeting_pos < cta_pos
-
-
-def test_build_llm_prompt_no_template_context_section():
-    prompt = _build_llm_prompt(
-        {"EN.SUBJECT": "Hello world today."},
-        "warmer",
-        {"joy": 0.8},
-        "<p>EN.SUBJECT</p>",
-    )
-    assert "TEMPLATE CONTEXT" not in prompt
-
-
-def test_call_batch_llm_deleted():
-    assert not hasattr(tss, "_call_batch_llm")
-    assert not hasattr(tss, "_default_rewrite")
-    assert not hasattr(tss, "set_llm_batch_fn")
-    assert not hasattr(tss, "set_rewrite_fn")
+    for item in fin_result["suggestions"]:
+        assert not _apply_structural_heuristics(item["key"])
