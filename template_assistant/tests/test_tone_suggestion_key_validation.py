@@ -11,28 +11,17 @@ from template_assistant.context import validate_session_context
 from template_assistant.services import working_copy_key
 from template_assistant.subagents.tone_suggestion_subagent import (
     KeyNotInGraphError,
+    _finalize_suggest_rewrites,
     apply_tone_suggestions,
     evaluate_eligibility,
     is_eligible_for_rewrite,
-    set_llm_batch_fn,
-    set_rewrite_fn,
     suggest_tone_rewrite,
-    suggest_tone_rewrites,
 )
 from template_assistant.tests.test_resolution_subagent import _seed_template
 
 
 LANG = "EN-US"
 BRAND = "BRANDX"
-
-
-@pytest.fixture(autouse=True)
-def reset_injected_fns():
-    set_rewrite_fn(None)
-    set_llm_batch_fn(None)
-    yield
-    set_rewrite_fn(None)
-    set_llm_batch_fn(None)
 
 
 def _eligible_key(name: str) -> str:
@@ -90,8 +79,8 @@ def test_ineligible_numeric():
 
 
 def test_ineligible_too_short():
-    assert is_eligible_for_rewrite(_eligible_key("TITLE"), "Short title", LANG, BRAND) is False
-    assert evaluate_eligibility(_eligible_key("TITLE"), "Short title", LANG, BRAND).reason == "too_short"
+    assert is_eligible_for_rewrite(_eligible_key("TITLE"), "Sho", LANG, BRAND) is False
+    assert evaluate_eligibility(_eligible_key("TITLE"), "Sho", LANG, BRAND).reason == "too_short"
 
 
 def test_bare_key_without_dot_is_eligible():
@@ -99,7 +88,7 @@ def test_bare_key_without_dot_is_eligible():
     assert is_eligible_for_rewrite("GREETING", _long_text(), LANG, BRAND)
 
 
-# --- T004/T005: suggest_tone_rewrite LLM validation ---
+# --- T004/T005: SuggestAgent rewrite validation ---
 
 
 @pytest.mark.asyncio
@@ -111,6 +100,7 @@ async def test_suggest_tone_rewrite_discards_hallucinated_keys(db_pool, redis_cl
         html=f"<p>##{key}##</p>",
         kv_pairs={key: _long_text()},
     )
+    session_state["tone_bearing_keys"] = {key: _long_text()}
 
     llm_payload = json.dumps(
         [
@@ -119,15 +109,17 @@ async def test_suggest_tone_rewrite_discards_hallucinated_keys(db_pool, redis_cl
         ]
     )
 
-    async def batch_fn(_prompt: str) -> str:
-        return llm_payload
-
-    set_llm_batch_fn(batch_fn)
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", session_state)
+
+    result = _finalize_suggest_rewrites(
+        llm_payload,
+        session_state["tone_bearing_keys"],
+        tool_result["suggestion_id"],
+    )
 
     assert len(result["suggestions"]) == 1
     assert result["suggestions"][0]["key"] == key
@@ -145,6 +137,7 @@ async def test_suggest_tone_rewrite_empty_when_only_hallucinated_keys(
         html=f"<p>##{key}##</p>",
         kv_pairs={key: _long_text()},
     )
+    session_state["tone_bearing_keys"] = {key: _long_text()}
 
     llm_payload = json.dumps(
         [
@@ -153,15 +146,17 @@ async def test_suggest_tone_rewrite_empty_when_only_hallucinated_keys(
         ]
     )
 
-    async def batch_fn(_prompt: str) -> str:
-        return llm_payload
-
-    set_llm_batch_fn(batch_fn)
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", session_state)
+
+    result = _finalize_suggest_rewrites(
+        llm_payload,
+        session_state["tone_bearing_keys"],
+        tool_result["suggestion_id"],
+    )
 
     assert result["suggestions"] == []
     assert len(result["discarded_keys"]) == 2
@@ -251,27 +246,3 @@ async def test_apply_succeeds_when_all_keys_valid(db_pool, redis_client, session
     assert result["applied"] == 1
     wc = await redis_client.hgetall(working_copy_key(ctx))
     assert wc[key.upper()] == new_value
-
-
-@pytest.mark.asyncio
-async def test_suggest_tone_rewrites_wrapper_returns_tone_suggestions(db_pool, redis_client, session_state):
-    key = _eligible_key("PARAGRAPH_1")
-    await _seed_template(
-        db_pool,
-        "TestTemplate",
-        html=f"<p>##{key}##</p>",
-        kv_pairs={key: _long_text()},
-    )
-
-    async def rewrite(_key, current, _profile, _ctx):
-        return current + " [rewritten]"
-
-    set_rewrite_fn(rewrite)
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
-    ):
-        suggestions = await suggest_tone_rewrites("warmer", session_state)
-
-    assert len(suggestions) == 1
-    assert suggestions[0].key == key

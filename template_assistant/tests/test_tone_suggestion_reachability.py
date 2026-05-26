@@ -10,24 +10,16 @@ import pytest
 from template_assistant.context import validate_session_context
 from template_assistant.services import working_copy_key
 from template_assistant.subagents.tone_suggestion_subagent import (
-    set_llm_batch_fn,
-    set_rewrite_fn,
+    _build_reachable_eligible,
+    _finalize_suggest_rewrites,
     suggest_tone_rewrite,
-    suggest_tone_rewrites,
 )
 from template_assistant.tests.test_resolution_subagent import _seed_template
+from shared.resolution.graph_builder import build_resolution_graph
+from template_assistant.services import resolve_template
 
 LANG = "EN-US"
 BRAND = "BRANDX"
-
-
-@pytest.fixture(autouse=True)
-def reset_injected_fns():
-    set_rewrite_fn(None)
-    set_llm_batch_fn(None)
-    yield
-    set_rewrite_fn(None)
-    set_llm_batch_fn(None)
 
 
 def _eligible_key(name: str) -> str:
@@ -55,6 +47,14 @@ async def test_unreachable_graph_keys_excluded_from_suggestions(
         },
     )
 
+    session_context = validate_session_context(session_state)
+    resolution = await resolve_template(session_context)
+    graph = await build_resolution_graph(db_pool, session_context.template_name)
+    eligible, _ = await _build_reachable_eligible(
+        graph, resolution, session_context, session_state
+    )
+    session_state["tone_bearing_keys"] = eligible
+
     llm_payload = json.dumps(
         [
             {"key": used_key, "new_value": _long_text(" Rewritten.")},
@@ -62,20 +62,21 @@ async def test_unreachable_graph_keys_excluded_from_suggestions(
         ]
     )
 
-    async def batch_fn(_prompt: str) -> str:
-        return llm_payload
-
-    set_llm_batch_fn(batch_fn)
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        result = await suggest_tone_rewrite("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", session_state)
+
+    result = _finalize_suggest_rewrites(
+        llm_payload,
+        eligible,
+        tool_result["suggestion_id"],
+    )
 
     suggestion_keys = {item["key"] for item in result["suggestions"]}
     assert used_key in suggestion_keys
     assert orphan_key not in suggestion_keys
-    assert orphan_key not in result["ineligible_keys"]
 
 
 @pytest.mark.asyncio
@@ -97,20 +98,15 @@ async def test_working_copy_value_used_for_eligibility_not_graph_value(
         url_value,
     )
 
-    llm_payload = json.dumps([{"key": key, "new_value": _long_text(" Rewritten.")}])
+    session_context = validate_session_context(session_state)
+    resolution = await resolve_template(session_context)
+    graph = await build_resolution_graph(db_pool, session_context.template_name)
+    eligible, ineligible_keys = await _build_reachable_eligible(
+        graph, resolution, session_context, session_state
+    )
 
-    async def batch_fn(_prompt: str) -> str:
-        return llm_payload
-
-    set_llm_batch_fn(batch_fn)
-    with patch(
-        "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
-        return_value=lambda _text: [{"label": "joy", "score": 0.5}],
-    ):
-        result = await suggest_tone_rewrite("warmer", session_state)
-
-    assert key not in {item["key"] for item in result["suggestions"]}
-    assert key in result["ineligible_keys"]
+    assert key not in eligible
+    assert key in ineligible_keys
 
 
 @pytest.mark.asyncio
@@ -136,20 +132,32 @@ async def test_transitive_prose_eligible_bare_token_filtered(
         " and we are glad to have you here today."
     )
 
-    async def rewrite(key, current, _profile, _ctx):
-        if key == greeting_key:
-            return rewritten_greeting
-        return current
+    session_context = validate_session_context(session_state)
+    resolution = await resolve_template(session_context)
+    graph = await build_resolution_graph(db_pool, session_context.template_name)
+    eligible, _ = await _build_reachable_eligible(
+        graph, resolution, session_context, session_state
+    )
+    session_state["tone_bearing_keys"] = eligible
 
-    set_rewrite_fn(rewrite)
+    llm_payload = json.dumps(
+        [{"key": greeting_key, "new_value": rewritten_greeting}]
+    )
+
     with patch(
         "template_assistant.subagents.tone_suggestion_subagent.get_classifier",
         return_value=lambda _text: [{"label": "joy", "score": 0.5}],
     ):
-        suggestions = await suggest_tone_rewrites("warmer", session_state)
+        tool_result = await suggest_tone_rewrite("warmer", session_state)
 
-    suggestion_keys = {item.key for item in suggestions}
+    result = _finalize_suggest_rewrites(
+        llm_payload,
+        eligible,
+        tool_result["suggestion_id"],
+    )
+
+    suggestion_keys = {item["key"] for item in result["suggestions"]}
     assert greeting_key in suggestion_keys
     assert first_name_key not in suggestion_keys
-    greeting = next(item for item in suggestions if item.key == greeting_key)
-    assert f"##{first_name_key}##" in greeting.suggested_value
+    greeting = next(item for item in result["suggestions"] if item["key"] == greeting_key)
+    assert f"##{first_name_key}##" in greeting["new_value"]

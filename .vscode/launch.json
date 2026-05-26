@@ -50,6 +50,19 @@
             },
             "console": "integratedTerminal",
             "justMyCode": false
-        }
+        },
+        {
+            "name": "Smoke: Change Tone",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/smoke_change_tone.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+              "PYTHONPATH": "${workspaceFolder}"
+            },
+            "python": "${workspaceFolder}/.venv/bin/python"
+          }
     ]
 }
