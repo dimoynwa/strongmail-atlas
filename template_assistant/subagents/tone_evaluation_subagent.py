@@ -16,6 +16,27 @@ from template_assistant.services import resolve_template, working_copy_key
 from template_assistant.utils.text import extract_plain_text
 
 
+def normalize_stored_tones(raw: Any) -> dict[str, float] | None:
+    """Convert template_tone_evaluations.tones to label→score dict."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        return {str(k): float(v) for k, v in raw.items()}
+    if isinstance(raw, list):
+        scores: dict[str, float] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            score = item.get("score")
+            if label is not None and score is not None:
+                scores[str(label)] = float(score)
+        return scores or None
+    return None
+
+
 async def _has_working_copy(session_state: dict) -> bool:
     from shared.redis_client import get_redis
 
@@ -56,6 +77,34 @@ def _zero_score_labels() -> list[str]:
     return sorted(GOEMOTIONS_LABELS)
 
 
+async def store_tone_scores(
+    scores: dict[str, float], session_state: dict, *, model_id: str = "goemotions"
+) -> None:
+    """Persist tone scores to template_tone_evaluations for the current template context."""
+    session_context = validate_session_context(session_state)
+    pool = get_pool()
+    tones_json = json.dumps({str(k): float(v) for k, v in scores.items()})
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO template_tone_evaluations
+                (template_id, model_id, lang_local, param_cust_brand, tones, evaluated_at)
+            SELECT t.id, $2, $3, $4, $5::jsonb, NOW()
+            FROM template t
+            WHERE t.name = $1
+            ON CONFLICT (template_id, model_id, lang_local, param_cust_brand)
+            DO UPDATE SET
+                tones = EXCLUDED.tones,
+                evaluated_at = EXCLUDED.evaluated_at
+            """,
+            session_context.template_name,
+            model_id,
+            session_context.lang_local,
+            session_context.param_cust_brand,
+            tones_json,
+        )
+
+
 async def get_stored_tone_scores(session_state: dict) -> dict[str, float] | None:
     """Read historical tone scores from template_tone_evaluations."""
     session_context = validate_session_context(session_state)
@@ -79,12 +128,7 @@ async def get_stored_tone_scores(session_state: dict) -> dict[str, float] | None
     if row is None:
         return None
 
-    tones = row["tones"]
-    if isinstance(tones, str):
-        return json.loads(tones)
-    if isinstance(tones, dict):
-        return {str(k): float(v) for k, v in tones.items()}
-    return None
+    return normalize_stored_tones(row["tones"])
 
 
 async def _evaluate_tone_tool(tool_context: ToolContext) -> dict[str, Any]:
@@ -101,6 +145,13 @@ async def _get_stored_tone_scores_tool(tool_context: ToolContext) -> dict[str, f
     return await get_stored_tone_scores(tool_context.state.to_dict())
 
 
+async def _store_tone_scores_tool(
+    scores: dict[str, float], tool_context: ToolContext
+) -> dict[str, bool]:
+    await store_tone_scores(scores, tool_context.state.to_dict())
+    return {"stored": True}
+
+
 def create_tone_evaluation_subagent() -> LlmAgent:
     return LlmAgent(
         name="ToneEvaluationSubagent",
@@ -110,7 +161,8 @@ def create_tone_evaluation_subagent() -> LlmAgent:
         BERT classifier. Always runs a fresh evaluation against the current
         resolved template state — including any working copy overrides active
         in this session. Can also retrieve previously stored tone scores from
-        the database for comparison. Never writes to Redis or PostgreSQL.
+        the database for comparison. Never writes to Redis; persists evaluations
+        to PostgreSQL only via store_tone_scores when asked to save scores.
         """,
         instruction="""
         You are the Tone Evaluation Subagent. You score the emotional content
@@ -133,6 +185,8 @@ def create_tone_evaluation_subagent() -> LlmAgent:
         - get_stored_tone_scores: queries template_tone_evaluations in PostgreSQL
           for the most recent stored scores matching this template, lang_local,
           and param_cust_brand. Returns None when no stored scores exist.
+        - store_tone_scores: upserts the provided emotion scores into
+          template_tone_evaluations for the current template context.
 
         ## Behaviour rules
         - Always validate SessionContext as the first action in every tool call.
@@ -152,7 +206,7 @@ def create_tone_evaluation_subagent() -> LlmAgent:
           produces the same scores. Make this clear if the user asks why
           scores are identical across two evaluations of unchanged content.
         """,
-        tools=[_evaluate_tone_tool, _get_stored_tone_scores_tool],
+        tools=[_evaluate_tone_tool, _get_stored_tone_scores_tool, _store_tone_scores_tool],
     )
 
 

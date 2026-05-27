@@ -9,6 +9,8 @@ def get_classifier() -> Any:
     """Return the lazily-loaded GoEmotions pipeline singleton."""
     global _classifier
     if _classifier is None:
+        import torchvision  # noqa: F401 — transformers vision modules expect this
+
         from transformers import pipeline
 
         _classifier = pipeline(

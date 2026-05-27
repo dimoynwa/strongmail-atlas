@@ -25,3 +25,8 @@ db
 backup/*.sql
 template_assistant/.adk/
 general_agent/.adk/
+
+# Build / logs
+*.log
+coverage/
+.streamlit/secrets.toml

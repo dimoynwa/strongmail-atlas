@@ -79,6 +79,11 @@ def _resolve_provider(provider: str) -> ModelSpec:
             max_tokens=4096,
         )
 
+    if provider == "openai":
+        return LiteLlm(
+            model="openai/gpt-4o"
+        )
+
     raise ValueError(
         f"Unsupported model provider {provider!r}. "
         "Use one of: gemini, ollama, bedrock, bedrock_nova_pro."

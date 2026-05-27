@@ -1,0 +1,463 @@
+{
+  "info": {
+    "_postman_id": "strongmail-agent-studio-api",
+    "name": "StrongMail Agent Studio API",
+    "description": "FastAPI wrapper for StrongMail Agent Studio.\n\nRun requests top-to-bottom. `POST /session` saves `session_id` automatically for later requests.\n\nPrerequisites: PostgreSQL, Redis, and GoEmotions model loaded (first startup may take ~30–60s).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "session_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "template_name",
+      "value": "NFY_SM_REGISTERED",
+      "type": "string"
+    },
+    {
+      "key": "lang_local",
+      "value": "EN",
+      "type": "string"
+    },
+    {
+      "key": "param_cust_brand",
+      "value": "SKRILL",
+      "type": "string"
+    },
+    {
+      "key": "wc_key",
+      "value": "EN.SUBJECT",
+      "type": "string"
+    },
+    {
+      "key": "wc_value",
+      "value": "Your Skrill password reset — action needed",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "description": "Verify backend dependencies before starting a session.",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health",
+            "description": "Poll connection status for PostgreSQL, Redis, GoEmotions, and ADK. Always returns 200 — read the JSON body for component health."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Template Discovery",
+      "description": "Load sidebar data: template list, locales, and brands.",
+      "item": [
+        {
+          "name": "GET /templates",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/templates",
+            "description": "Returns all ACTIVE templates with key counts and summaries."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /templates/locales",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/templates/locales",
+            "description": "Distinct lang_local values for the locale selector."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /templates/brands",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/templates/brands",
+            "description": "Distinct param_cust_brand values for the brand selector."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Session",
+      "description": "Create an ADK session for a template + locale + brand. Required before all session-scoped endpoints.",
+      "item": [
+        {
+          "name": "POST /session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('session_id', body.session_id);",
+                  "    pm.test('session_id captured', () => pm.expect(body.session_id).to.be.a('string').and.not.empty);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_name\": \"{{template_name}}\",\n  \"lang_local\": \"{{lang_local}}\",\n  \"param_cust_brand\": \"{{param_cust_brand}}\"\n}"
+            },
+            "url": "{{baseUrl}}/session",
+            "description": "Creates an ADK session, pre-builds the resolution graph, and returns session_id. Updates the `session_id` collection variable on success."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Initial State",
+      "description": "Read working copy and preview immediately after session creation.",
+      "item": [
+        {
+          "name": "GET /working-copy/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/working-copy/{{session_id}}",
+            "description": "Returns all Redis overrides for this session. Empty overrides is valid (not 404)."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /preview/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/preview/{{session_id}}?highlight_modified=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["preview", "{{session_id}}"],
+              "query": [
+                {
+                  "key": "highlight_modified",
+                  "value": "true",
+                  "description": "Wrap modified placeholder values in a green highlight span."
+                }
+              ]
+            },
+            "description": "Resolves full HTML and plain text using the current working copy."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Tone",
+      "description": "Evaluate emotional tone and read stored baseline scores.",
+      "item": [
+        {
+          "name": "GET /tone/stored/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tone/stored/{{session_id}}",
+            "description": "Most recent tone evaluation from template_tone_evaluations (offline pipeline). Returns 200 with null emotions when none stored."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /tone/evaluate/{session_id}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"top_n\": 5\n}"
+            },
+            "url": "{{baseUrl}}/tone/evaluate/{{session_id}}",
+            "description": "Runs GoEmotions on the resolved template text. Body is optional (top_n defaults to 5)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. Chat (SSE)",
+      "description": "Natural-language agent interaction. Responses are Server-Sent Events — Postman shows the raw stream.",
+      "item": [
+        {
+          "name": "POST /chat/stream — template agent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Make this template feel more reassuring and less urgent.\",\n  \"session_id\": \"{{session_id}}\",\n  \"agent\": \"template\"\n}"
+            },
+            "url": "{{baseUrl}}/chat/stream",
+            "description": "Streams tool, token, final, wc_updated, and error events.\n\nExample SSE lines:\n`data: {\"type\":\"tool\",\"name\":\"...\"}`\n`data: {\"type\":\"token\",\"text\":\"...\"}`\n`data: {\"type\":\"final\",\"text\":\"...\",\"diff\":null}`\n\nIf suggest_tone_rewrite ran, final event includes a diff with pending suggestions."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /chat/stream — general agent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Find password-related templates that feel reassuring.\",\n  \"agent\": \"general\"\n}"
+            },
+            "url": "{{baseUrl}}/chat/stream",
+            "description": "Catalog-wide read-only agent. session_id is optional — a transient session is created when omitted."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "7. Apply Tone Suggestions",
+      "description": "Write pending suggestions from the last suggest_tone_rewrite call to Redis.",
+      "item": [
+        {
+          "name": "POST /tone/apply/{session_id} — apply all",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": "{{baseUrl}}/tone/apply/{{session_id}}",
+            "description": "Applies all pending suggestions from ADK session state. Run after a chat turn that produced a diff. Empty body applies all."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /tone/apply/{session_id} — apply selected keys",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"keys\": [\"EN.SUBJECT\", \"EN.PARAGRAPH_1\"]\n}"
+            },
+            "url": "{{baseUrl}}/tone/apply/{{session_id}}",
+            "description": "Applies only the listed keys from pending suggestions."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "8. Verify After Apply",
+      "description": "Re-read state and re-evaluate tone after applying suggestions.",
+      "item": [
+        {
+          "name": "GET /working-copy/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/working-copy/{{session_id}}",
+            "description": "Confirm overrides were written to Redis."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /preview/{session_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/preview/{{session_id}}?highlight_modified=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["preview", "{{session_id}}"],
+              "query": [
+                {
+                  "key": "highlight_modified",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Preview with highlighted modified placeholders."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /tone/evaluate/{session_id}",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"top_n\": 5\n}"
+            },
+            "url": "{{baseUrl}}/tone/evaluate/{{session_id}}",
+            "description": "Re-score tone against the updated working copy."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "9. Undo Tone",
+      "description": "Restore working copy from the pre-suggestion snapshot.",
+      "item": [
+        {
+          "name": "POST /tone/undo/{session_id} — undo all",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": "{{baseUrl}}/tone/undo/{{session_id}}",
+            "description": "Restores all keys from the tone suggestion snapshot and clears it."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /tone/undo/{session_id} — undo selected keys",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"keys\": [\"EN.PARAGRAPH_1\"]\n}"
+            },
+            "url": "{{baseUrl}}/tone/undo/{{session_id}}",
+            "description": "Restores only the listed keys from the snapshot."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "10. Manual Working Copy Edit",
+      "description": "Direct Redis override without going through the agent.",
+      "item": [
+        {
+          "name": "PATCH /working-copy/{session_id}",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"key\": \"{{wc_key}}\",\n  \"value\": \"{{wc_value}}\"\n}"
+            },
+            "url": "{{baseUrl}}/working-copy/{{session_id}}",
+            "description": "Writes a single placeholder override. Key must exist in the resolution graph."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "11. Export",
+      "description": "Download working copy as a JSON patch file.",
+      "item": [
+        {
+          "name": "GET /working-copy/{session_id}/export",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/working-copy/{{session_id}}/export",
+            "description": "Returns JSON with Content-Disposition attachment header."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "12. Cleanup",
+      "description": "Delete the Redis working copy hash for this session.",
+      "item": [
+        {
+          "name": "DELETE /working-copy/{session_id}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/working-copy/{{session_id}}",
+            "description": "Deletes the entire working copy hash. Irreversible."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
