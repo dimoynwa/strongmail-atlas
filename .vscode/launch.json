@@ -31,10 +31,31 @@
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "TEMPLATE_NAME": "NFY_PASSWORD_CREATED",
+                "TEMPLATE_NAME": "NFY_SM_REGISTERED",
                 "LANG_LOCAL": "EN",
                 "PARAM_CUST_BRAND": "SKRILL",
                 "TEMPLATE_ASSISTANT_MODEL": "bedrock_nova_pro"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "ADK Web: General Agent",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "google.adk.cli",
+            "args": [
+                "web",
+                "general_agent",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--reload"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
             },
             "envFile": "${workspaceFolder}/.env",
             "console": "integratedTerminal",
@@ -50,6 +71,19 @@
             },
             "console": "integratedTerminal",
             "justMyCode": false
-        }
+        },
+        {
+            "name": "Smoke: Change Tone",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/smoke_change_tone.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+              "PYTHONPATH": "${workspaceFolder}"
+            },
+            "python": "${workspaceFolder}/.venv/bin/python"
+          }
     ]
 }

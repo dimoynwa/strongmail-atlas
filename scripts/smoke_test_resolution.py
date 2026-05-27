@@ -6,7 +6,8 @@ from shared.redis_client import get_redis, init_redis
 from shared.resolution.graph_builder import build_resolution_graph
 from shared.resolution.resolver import resolve_body
 
-TEMPLATE_NAME = "NFY_PASSWORD_CREATED"
+# TEMPLATE_NAME = "NFY_PASSWORD_CREATED"
+TEMPLATE_NAME = "NFY_SM_REGISTERED"
 
 
 async def smoke_test() -> None:
