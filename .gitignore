@@ -24,3 +24,4 @@ db
 # Local dev data / runtime
 backup/*.sql
 template_assistant/.adk/
+general_agent/.adk/
