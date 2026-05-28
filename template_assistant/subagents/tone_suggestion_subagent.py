@@ -15,17 +15,22 @@ from template_assistant.llm import get_llm_model
 from shared.db import get_pool
 from shared.redis_client import get_redis
 from shared.resolution.graph_builder import build_resolution_graph
+from shared.resolution.resolver import resolve_body
 from template_assistant.context import (
     MissingClassificationError,
     SessionContext,
     SuggestionIdMismatchError,
+    build_resolution_context,
     validate_session_context,
 )
 from template_assistant.ml.goemotions import get_classifier, scores_from_pipeline_result
 from template_assistant.models import ToneSuggestion
 from template_assistant.services import (
     SNAPSHOT_NONE_SENTINEL,
+    build_tone_eligible_keys,
+    fetch_template_bodies,
     resolve_template,
+    select_reachability_body,
     snapshot_key,
     working_copy_key,
 )
@@ -333,12 +338,39 @@ async def _build_reachable_eligible(
     session_state: dict,
 ) -> tuple[dict[str, str], list[str]]:
     """Apply reachability pre-filter, then content eligibility filter."""
-    reachable = set(resolution.resolved_keys)
+    del resolution
     wc = await get_working_copy(session_state)
-    eligible: dict[str, str] = {}
+    eligible = await build_tone_eligible_keys(
+        session_context, graph=graph, working_copy=wc
+    )
+    pool = get_pool()
+    redis_client = get_redis()
+    html_body, text_body = await fetch_template_bodies(
+        pool,
+        session_context.template_name,
+        session_context.lang_local,
+        session_context.param_cust_brand,
+    )
+    body = select_reachability_body(html_body, text_body)
+    if not body.strip():
+        return eligible, []
+
+    context = build_resolution_context(session_context)
+    accumulated_keys: set[str] = set()
+    await resolve_body(
+        pool,
+        redis_client,
+        graph,
+        body,
+        context,
+        session_context.session_id,
+        session_context.template_name,
+        accumulated_keys=accumulated_keys,
+    )
+    reachable = accumulated_keys
     ineligible_keys: list[str] = []
     for key, graph_value in graph.items():
-        if key not in reachable:
+        if key not in reachable or key in eligible:
             continue
         value = wc.get(key, graph_value)
         result = evaluate_eligibility(
@@ -347,9 +379,7 @@ async def _build_reachable_eligible(
             session_context.lang_local,
             session_context.param_cust_brand,
         )
-        if result.eligible:
-            eligible[key] = value
-        else:
+        if not result.eligible:
             ineligible_keys.append(key)
     return eligible, ineligible_keys
 
@@ -487,9 +517,9 @@ async def load_eligible_keys(
         session_context = validate_session_context(state)
         pool = get_pool()
         graph = await build_resolution_graph(pool, session_context.template_name)
-        resolution = await resolve_template(session_context)
-        eligible, _ = await _build_reachable_eligible(
-            graph, resolution, session_context, state
+        wc = await get_working_copy(state)
+        eligible = await build_tone_eligible_keys(
+            session_context, graph=graph, working_copy=wc
         )
         tool_context.state["eligible_keys"] = eligible
         return {"eligible_keys": eligible, "total": len(eligible)}

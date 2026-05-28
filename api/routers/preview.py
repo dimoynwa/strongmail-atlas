@@ -16,11 +16,16 @@ router = APIRouter(tags=["preview"])
 async def get_preview(
     session_id: str,
     highlight_modified: bool = Query(default=True),
+    include_unresolvable_scan: bool = Query(default=True),
     session_state: dict[str, Any] = Depends(require_session),
 ) -> PreviewResponse:
     del session_id
     try:
-        result = await build_preview(session_state, highlight_modified=highlight_modified)
+        result = await build_preview(
+            session_state,
+            highlight_modified=highlight_modified,
+            include_unresolvable_scan=include_unresolvable_scan,
+        )
     except Exception as exc:
         raise api_error(500, "ResolutionFailed", f"Template resolution failed: {exc}") from exc
 
@@ -33,5 +38,8 @@ async def get_preview(
         total_placeholders=result["total_placeholders"],
         resolved_count=result["resolved_count"],
         unresolvable_count=result["unresolvable_count"],
+        tokens_scanned=result["tokens_scanned"],
+        resolved_token_count=result["resolved_token_count"],
+        scan_sources=result["scan_sources"],
         evaluated_from=result["evaluated_from"],
     )

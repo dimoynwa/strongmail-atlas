@@ -54,6 +54,12 @@ class WorkingCopyResponse(BaseModel):
     session_has_changes: bool
 
 
+class WorkingCopyInitResponse(WorkingCopyResponse):
+    initialized: bool
+    source: Literal["created", "existing"]
+    tone_key_count: int
+
+
 class WorkingCopyPatchResponse(BaseModel):
     key: str
     value: str
@@ -69,6 +75,7 @@ class WorkingCopyDeleteResponse(BaseModel):
 class UnresolvableKey(BaseModel):
     key: str
     reason: str
+    detail: str = ""
 
 
 class PreviewResponse(BaseModel):
@@ -78,6 +85,9 @@ class PreviewResponse(BaseModel):
     total_placeholders: int
     resolved_count: int
     unresolvable_count: int
+    tokens_scanned: int
+    resolved_token_count: int
+    scan_sources: list[str]
     evaluated_from: Literal["working_copy", "graph"]
 
 

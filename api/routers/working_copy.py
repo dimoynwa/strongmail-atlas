@@ -11,16 +11,98 @@ from api.middleware.session_guard import require_session
 from api.models.requests import WorkingCopyPatchRequest
 from api.models.responses import (
     WorkingCopyDeleteResponse,
+    WorkingCopyInitResponse,
     WorkingCopyOverride,
     WorkingCopyPatchResponse,
     WorkingCopyResponse,
 )
 from shared.redis_client import get_redis
 from template_assistant.context import validate_session_context
-from template_assistant.services import working_copy_key
+from template_assistant.services import build_tone_eligible_keys, working_copy_key
 from template_assistant.subagents.working_copy_subagent import get_working_copy
 
 router = APIRouter(prefix="/working-copy", tags=["working-copy"])
+
+
+def _overrides_from_map(overrides_map: dict[str, str]) -> list[WorkingCopyOverride]:
+    return [
+        WorkingCopyOverride(key=key, value=value, set_at=None)
+        for key, value in sorted(overrides_map.items())
+    ]
+
+
+def _working_copy_response(
+    session_id: str,
+    overrides_map: dict[str, str],
+) -> WorkingCopyResponse:
+    overrides = _overrides_from_map(overrides_map)
+    total = len(overrides)
+    return WorkingCopyResponse(
+        session_id=session_id,
+        overrides=overrides,
+        total_overrides=total,
+        session_has_changes=total > 0,
+    )
+
+
+@router.post("/{session_id}/init", response_model=WorkingCopyInitResponse)
+async def init_working_copy(
+    session_id: str,
+    session_state: dict[str, Any] = Depends(require_session),
+) -> WorkingCopyInitResponse:
+    session_context = validate_session_context(session_state)
+    redis_client = get_redis()
+    wc_key = working_copy_key(session_context)
+
+    try:
+        existing = await redis_client.hgetall(wc_key)
+    except Exception as exc:
+        raise api_error(503, "RedisUnavailable", f"Redis unavailable: {exc}") from exc
+
+    try:
+        tone_eligible = await build_tone_eligible_keys(session_context)
+    except Exception as exc:
+        raise api_error(
+            500,
+            "ResolutionFailed",
+            f"Failed to discover tone-eligible keys: {exc}",
+        ) from exc
+
+    tone_key_count = len(tone_eligible)
+
+    if existing:
+        base = _working_copy_response(session_id, existing)
+        return WorkingCopyInitResponse(
+            **base.model_dump(),
+            initialized=False,
+            source="existing",
+            tone_key_count=tone_key_count,
+        )
+
+    if not tone_eligible:
+        base = _working_copy_response(session_id, {})
+        return WorkingCopyInitResponse(
+            **base.model_dump(),
+            initialized=True,
+            source="created",
+            tone_key_count=0,
+        )
+
+    try:
+        async with redis_client.pipeline(transaction=True) as pipe:
+            for key, value in tone_eligible.items():
+                pipe.hset(wc_key, key, value)
+            await pipe.execute()
+    except Exception as exc:
+        raise api_error(503, "RedisUnavailable", f"Redis unavailable: {exc}") from exc
+
+    base = _working_copy_response(session_id, tone_eligible)
+    return WorkingCopyInitResponse(
+        **base.model_dump(),
+        initialized=True,
+        source="created",
+        tone_key_count=tone_key_count,
+    )
 
 
 @router.get("/{session_id}", response_model=WorkingCopyResponse)
@@ -29,17 +111,7 @@ async def get_working_copy_endpoint(
     session_state: dict[str, Any] = Depends(require_session),
 ) -> WorkingCopyResponse:
     overrides_map = await get_working_copy(session_state)
-    overrides = [
-        WorkingCopyOverride(key=key, value=value, set_at=None)
-        for key, value in sorted(overrides_map.items())
-    ]
-    total = len(overrides)
-    return WorkingCopyResponse(
-        session_id=session_id,
-        overrides=overrides,
-        total_overrides=total,
-        session_has_changes=total > 0,
-    )
+    return _working_copy_response(session_id, overrides_map)
 
 
 @router.patch("/{session_id}", response_model=WorkingCopyPatchResponse)

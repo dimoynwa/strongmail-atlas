@@ -6,7 +6,11 @@ from shared.db import get_pool
 from shared.redis_client import get_redis
 from shared.resolution.resolver import resolve_body
 from template_assistant.context import build_resolution_context, validate_session_context
-from template_assistant.services import fetch_template_bodies, map_unresolvable_reason
+from template_assistant.services import (
+    count_body_tokens,
+    fetch_template_bodies,
+    scan_template_unresolvables,
+)
 from template_assistant.subagents.working_copy_subagent import get_working_copy
 
 from api.helpers import get_resolution_graph
@@ -28,6 +32,7 @@ async def build_preview(
     session_state: dict[str, Any],
     *,
     highlight_modified: bool = True,
+    include_unresolvable_scan: bool = True,
 ) -> dict[str, Any]:
     session_context = validate_session_context(session_state)
     pool = get_pool()
@@ -75,27 +80,42 @@ async def build_preview(
         if resolved_text:
             resolved_text = _apply_highlights(resolved_text, overrides)
 
-    unresolvable = html_result.unresolvable
-    if text_result:
-        seen = {entry.key for entry in unresolvable}
-        for entry in text_result.unresolvable:
-            if entry.key not in seen:
-                unresolvable.append(entry)
-                seen.add(entry.key)
+    scan_sources: list[str] = []
+    unresolvable_keys: list[dict[str, str]] = []
+    tokens_scanned = 0
 
-    unresolvable_keys = [
-        {"key": entry.key, "reason": map_unresolvable_reason(entry.reason)}
-        for entry in unresolvable
-    ]
-    total_placeholders = len(graph)
+    if include_unresolvable_scan:
+        unresolvables, scan_sources = await scan_template_unresolvables(
+            session_context,
+            graph=graph,
+        )
+        unresolvable_keys = [
+            {
+                "key": entry.key,
+                "reason": entry.reason.value,
+                "detail": entry.detail,
+            }
+            for entry in unresolvables
+        ]
+        scanned_bodies: list[str] = []
+        if "html" in scan_sources:
+            scanned_bodies.append(html_body)
+        if "text" in scan_sources:
+            scanned_bodies.append(text_body)
+        tokens_scanned = count_body_tokens(*scanned_bodies)
+
     unresolvable_count = len(unresolvable_keys)
+    resolved_token_count = max(tokens_scanned - unresolvable_count, 0)
 
     return {
         "resolved_html": resolved_html,
         "resolved_text": resolved_text,
         "unresolvable_keys": unresolvable_keys,
-        "total_placeholders": total_placeholders,
-        "resolved_count": max(total_placeholders - unresolvable_count, 0),
+        "total_placeholders": tokens_scanned,
+        "resolved_count": resolved_token_count,
         "unresolvable_count": unresolvable_count,
+        "tokens_scanned": tokens_scanned,
+        "resolved_token_count": resolved_token_count,
+        "scan_sources": scan_sources,
         "evaluated_from": evaluated_from,
     }
