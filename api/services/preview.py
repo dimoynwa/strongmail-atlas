@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 from shared.db import get_pool
@@ -15,16 +17,22 @@ from template_assistant.subagents.working_copy_subagent import get_working_copy
 
 from api.helpers import get_resolution_graph
 
-_HIGHLIGHT_SPAN = (
-    '<span style="border-left:2px solid #22c55e;padding-left:6px;color:#166534">{value}</span>'
-)
-
 
 def _apply_highlights(resolved: str, overrides: dict[str, str]) -> str:
     highlighted = resolved
     for value in overrides.values():
-        if value and value in highlighted:
-            highlighted = highlighted.replace(value, _HIGHLIGHT_SPAN.format(value=value))
+        if not value:
+            continue
+        match = re.search(re.escape(value), highlighted)
+        if not match:
+            continue
+        start, end = match.span()
+        span = (
+            '<span style="border-left:2px solid #22c55e;padding-left:6px;color:#166534">'
+            f"{html.escape(value, quote=False)}"
+            "</span>"
+        )
+        highlighted = highlighted[:start] + span + highlighted[end:]
     return highlighted
 
 

@@ -5,6 +5,7 @@ import pytest
 from shared.resolution.preprocessors import (
     ENOPENTAG_KEY,
     ENVIEWINBROWSERTAG_KEY,
+    IGNCLICKTAG_KEY,
     FIXED_MAILINGID_KEY,
     FIXED_MAILINGID_VALUE,
     MS_ORG_ID_KEY,
@@ -48,10 +49,36 @@ def test_sm_rule_brand_logo_delegates_to_skrill():
     assert preprocess_key("SM_RULE_BRAND_LOGO", context) == "GENERAL_HEADER_LOGO_SKRILL"
 
 
+def test_sm_rule_general_brand_logo_delegates_to_skrill():
+    context = {"PARAM_CUST_BRAND": "SKRILL"}
+    assert preprocess_key("SM_RULE_GENERAL_BRAND_LOGO", context) == "GENERAL_HEADER_LOGO_SKRILL"
+
+
+def test_sm_rule_general_brand_logo_delegates_to_neteller():
+    context = {"PARAM_CUST_BRAND": "NETELLER"}
+    assert preprocess_key("SM_RULE_GENERAL_BRAND_LOGO", context) == "GENERAL_HEADER_LOGO_NETELLER"
+
+
+def test_sm_rule_brand_logo_2_delegates_to_skrill_header_logo_2():
+    context = {"PARAM_CUST_BRAND": "SKRILL"}
+    assert preprocess_key("SM_RULE_BRAND_LOGO_2", context) == "GENERAL_HEADER_LOGO_2_SKRILL"
+
+
+def test_sm_rule_brand_logo_2_delegates_to_neteller_header_logo_2():
+    context = {"PARAM_CUST_BRAND": "NETELLER"}
+    assert preprocess_key("SM_RULE_BRAND_LOGO_2", context) == "GENERAL_HEADER_LOGO_2_NETELLER"
+
+
 def test_enopentag_preprocessing():
     context: dict[str, str] = {}
     assert preprocess_key("ENOPENTAG", context) == ENOPENTAG_KEY
     assert context[ENOPENTAG_KEY] == ""
+
+
+def test_ignclicktag_preprocessing():
+    context: dict[str, str] = {}
+    assert preprocess_key("IGNCLICKTAG", context) == IGNCLICKTAG_KEY
+    assert context[IGNCLICKTAG_KEY] == ""
 
 
 def test_view_transaction_button_preprocessing():

@@ -18,7 +18,11 @@ from api.models.responses import (
 )
 from shared.redis_client import get_redis
 from template_assistant.context import validate_session_context
-from template_assistant.services import build_tone_eligible_keys, working_copy_key
+from template_assistant.services import (
+    build_tone_eligible_keys,
+    is_working_copy_patchable_key,
+    working_copy_key,
+)
 from template_assistant.subagents.working_copy_subagent import get_working_copy
 
 router = APIRouter(prefix="/working-copy", tags=["working-copy"])
@@ -122,16 +126,18 @@ async def patch_working_copy(
 ) -> WorkingCopyPatchResponse:
     del session_id
     canonical_key = body.key.upper()
+    session_context = validate_session_context(session_state)
     graph = await get_resolution_graph(session_state)
-    if canonical_key not in graph:
-        session_context = validate_session_context(session_state)
+    if not await is_working_copy_patchable_key(
+        canonical_key,
+        graph=graph,
+        session_context=session_context,
+    ):
         raise api_error(
             404,
             "KeyNotInGraph",
             f"{canonical_key} is not in the resolution graph for {session_context.template_name}",
         )
-
-    session_context = validate_session_context(session_state)
     redis_client = get_redis()
     wc_key = working_copy_key(session_context)
     try:

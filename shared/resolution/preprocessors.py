@@ -6,6 +6,7 @@ import re
 from abc import ABC, abstractmethod
 
 ARGDELIMITER_SPACE_KEY = "__ARGDELIMITER_SPACE__"
+IGNCLICKTAG_KEY = "__IGNCLICKTAG__"
 IGNCLICKTAG_SPACE_KEY = "__IGNCLICKTAG_SPACE__"
 FIXED_MAILINGID_KEY = "__FIXED_MAILINGID__"
 FIXED_MAILINGID_VALUE = "1914"
@@ -132,6 +133,13 @@ class ArgDelimiterSpacePreprocessor(PlaceholderPreprocessor):
     def process(self, key: str, context: dict[str, str]) -> str:
         if key == "ARGDELIMITER":
             return _inject(context, ARGDELIMITER_SPACE_KEY, " ")
+        return key
+
+
+class IgnClickTagPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "IGNCLICKTAG":
+            return _inject(context, IGNCLICKTAG_KEY, "")
         return key
 
 
@@ -310,6 +318,28 @@ class SmRuleBrandLogoPreprocessor(PlaceholderPreprocessor):
         )
 
 
+class SmRuleBrandLogo2Preprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        return _skip_or_delegate(
+            key,
+            context,
+            "SM_RULE_BRAND_LOGO_2",
+            GENERAL_HEADER_LOGO_2_NETELLER,
+            GENERAL_HEADER_LOGO_2_SKRILL,
+        )
+
+
+class SmRuleGeneralBrandLogoPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        return _skip_or_delegate(
+            key,
+            context,
+            "SM_RULE_GENERAL_BRAND_LOGO",
+            GENERAL_HEADER_LOGO_NETELLER,
+            GENERAL_HEADER_LOGO_SKRILL,
+        )
+
+
 class SmRuleGeneralBrandLogo2Preprocessor(PlaceholderPreprocessor):
     def process(self, key: str, context: dict[str, str]) -> str:
         return _skip_or_delegate(
@@ -379,6 +409,7 @@ def default_preprocessor_pipeline() -> PlaceholderPreprocessorPipeline:
         [
             FspCapitalizePreprocessor(),
             ArgDelimiterSpacePreprocessor(),
+            IgnClickTagPreprocessor(),
             IgnClickTagSpacePreprocessor(),
             FixedMailingIdPreprocessor(),
             EnopentagPreprocessor(),
@@ -398,6 +429,8 @@ def default_preprocessor_pipeline() -> PlaceholderPreprocessorPipeline:
             SmRuleBrandBurgerMenuColorPreprocessor(),
             SmRuleBrandBurgerWrapperColorPreprocessor(),
             SmRuleBrandLogoPreprocessor(),
+            SmRuleBrandLogo2Preprocessor(),
+            SmRuleGeneralBrandLogoPreprocessor(),
             SmRuleGeneralBrandLogo2Preprocessor(),
             SmRuleBrandSignOffLogoPreprocessor(),
             SmRuleBrandFooterPreprocessor(),

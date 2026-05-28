@@ -110,7 +110,30 @@ async def test_build_tone_eligible_keys_stores_empty_for_unresolved(
     eligible = await build_tone_eligible_keys(session_context)
 
     assert used_key in eligible
-    assert missing_key not in eligible
+    assert missing_key in eligible
+    assert eligible[missing_key] == ""
+
+
+@pytest.mark.asyncio
+async def test_build_tone_eligible_keys_includes_html_only_unresolvable(
+    db_pool, redis_client, session_state
+):
+    text_key = _eligible_key("PARAGRAPH_1")
+    html_only_missing = _eligible_key("HTML_ONLY_MISSING")
+    await _seed_template(
+        db_pool,
+        "TestTemplate",
+        html=f"<p>##{html_only_missing}##</p>",
+        text=f"##{text_key}##",
+        kv_pairs={text_key: _long_text()},
+    )
+
+    session_context = validate_session_context(session_state)
+    eligible = await build_tone_eligible_keys(session_context)
+
+    assert text_key in eligible
+    assert html_only_missing in eligible
+    assert eligible[html_only_missing] == ""
 
 
 @pytest.mark.asyncio

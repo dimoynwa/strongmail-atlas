@@ -248,7 +248,47 @@ async def build_tone_eligible_keys(
         )
         eligible[key] = resolved_value if resolved_value is not None else ""
 
+    unresolvable_entries, _scan_sources = await scan_template_unresolvables(
+        session_context,
+        graph=graph,
+    )
+    for entry in unresolvable_entries:
+        eligible.setdefault(entry.key, "")
+
     return eligible
+
+
+async def is_working_copy_patchable_key(
+    canonical_key: str,
+    *,
+    graph: types.MappingProxyType[str, str],
+    session_context: SessionContext,
+) -> bool:
+    """Whether a key may be written via PATCH /working-copy.
+
+    Tone-eligible graph keys are always patchable. Keys seeded at init from the
+    unresolvable scan (or template placeholders) may not exist in the graph but
+    must remain editable.
+    """
+    if canonical_key in graph:
+        return True
+
+    redis_client = get_redis()
+    wc_key = working_copy_key(session_context)
+    if await redis_client.hexists(wc_key, canonical_key):
+        return True
+
+    pool = get_pool()
+    html_body, text_body = await fetch_template_bodies(
+        pool,
+        session_context.template_name,
+        session_context.lang_local,
+        session_context.param_cust_brand,
+    )
+    for body in (html_body, text_body):
+        if canonical_key in extract_placeholder_keys(body):
+            return True
+    return False
 
 
 def working_copy_key(session_context: SessionContext) -> str:
