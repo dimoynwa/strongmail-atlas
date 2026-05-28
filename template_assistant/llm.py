@@ -24,6 +24,22 @@ BEDROCK_MODEL = os.getenv(
 )
 BEDROCK_MODEL_NOVA_PRO = os.getenv("BEDROCK_MODEL_NOVA_PRO", "eu.amazon.nova-pro-v1:0")
 
+# --- Qwen (OpenAI-compatible server) — also used by ``adk_agents.model_factory`` -----------------
+
+_DEFAULT_QWEN_MODEL = "openai//models/Qwen/Qwen3.5-27B"
+_DEFAULT_QWEN_BASE = "http://gpuserver2.neterra.skrill.net:8010/v1"
+_DEFAULT_QWEN_KEY = "fake"
+
+def qwen_litellm_model() -> str:
+    return os.getenv("QWEN_LITELLM_MODEL", _DEFAULT_QWEN_MODEL)
+
+
+def qwen_api_base() -> str:
+    return os.getenv("QWEN_BASE_URL", _DEFAULT_QWEN_BASE)
+
+
+def qwen_api_key() -> str:
+    return os.getenv("QWEN_API_KEY", _DEFAULT_QWEN_KEY)
 
 def _default_model_provider() -> str:
     return os.getenv("TEMPLATE_ASSISTANT_MODEL", os.getenv("ADK_AGENT_MODEL", "bedrock"))
@@ -57,6 +73,14 @@ def _bedrock_litellm_model_id(raw: str) -> str:
 def _resolve_provider(provider: str) -> ModelSpec:
     _configure_litellm()
 
+    if provider == "qwen":
+        return LiteLlm(
+            model=qwen_litellm_model(),
+            api_base=qwen_api_base(),
+            api_key=qwen_api_key(),
+            kwargs={"enable_thinking": False},
+        )
+
     if provider == "gemini":
         return GEMINI_MODEL
 
@@ -86,7 +110,7 @@ def _resolve_provider(provider: str) -> ModelSpec:
 
     raise ValueError(
         f"Unsupported model provider {provider!r}. "
-        "Use one of: gemini, ollama, bedrock, bedrock_nova_pro."
+        "Use one of: qwen, gemini, ollama, bedrock, bedrock_nova_pro, openai."
     )
 
 
