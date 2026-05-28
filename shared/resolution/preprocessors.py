@@ -18,7 +18,15 @@ SM_RULE_BRAND_BURGER_MENU_COLOR_KEY = "__SM_RULE_BRAND_BURGER_MENU_COLOR__"
 SM_RULE_BRAND_BURGER_WRAPPER_COLOR_KEY = "__SM_RULE_BRAND_BURGER_WRAPPER_COLOR__"
 GENERAL_GREY_FOOTER_NAV_KEY = "__GENERAL_GREY_FOOTER_NAV__"
 ENOPENTAG_KEY = "__ENOPENTAG__"
+VIEW_TRANSACTION_BUTTON_KEY = "__VIEW_TRANSACTION_BUTTON__"
+TRANSACTION_DETAILS_TABLE_KEY = "__TRANSACTION_DETAILS_TABLE__"
+ENVIEWINBROWSERTAG_KEY = "__ENVIEWINBROWSERTAG__"
+MS_ORG_ID_KEY = "__MS_ORG_ID__"
+PARAM_CUST_ACC_URL_KEY = "__PARAM_CUST_ACC_URL__"
 SM_RULE_SKIP_KEY = "__SM_RULE_SKIP__"
+
+SKRILL_ACCOUNT_URL = "https://account.skrill.com/wallet"
+NETELLER_ACCOUNT_URL = "https://member.neteller.com/wallet/account/login"
 
 NETELLER_COLOR = "#255F11"
 DEFAULT_BRAND_COLOR = "#910590"
@@ -153,6 +161,42 @@ class GeneralGreyFooterNavPreprocessor(PlaceholderPreprocessor):
         if key == "GENERAL_GREY_FOOTER_NAV":
             return _inject(context, GENERAL_GREY_FOOTER_NAV_KEY, "")
         return key
+
+
+class ViewTransactionButtonPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "VIEW_TRANSACTION_BUTTON":
+            return _inject(context, VIEW_TRANSACTION_BUTTON_KEY, "")
+        return key
+
+
+class TransactionDetailsTablePreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "TRANSACTION_DETAILS_TABLE":
+            return _inject(context, TRANSACTION_DETAILS_TABLE_KEY, "")
+        return key
+
+
+class EnviewInBrowserTagPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "ENVIEWINBROWSERTAG":
+            return _inject(context, ENVIEWINBROWSERTAG_KEY, "")
+        return key
+
+
+class MsOrgIdPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "_MS_ORG_ID":
+            return _inject(context, MS_ORG_ID_KEY, "")
+        return key
+
+
+class ParamCustAccUrlPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key != "PARAM_CUST_ACC_URL":
+            return key
+        url = SKRILL_ACCOUNT_URL if _brand(context) == "SKRILL" else NETELLER_ACCOUNT_URL
+        return _inject(context, PARAM_CUST_ACC_URL_KEY, url)
 
 
 class NamespacePreprocessor(PlaceholderPreprocessor):
@@ -339,6 +383,11 @@ def default_preprocessor_pipeline() -> PlaceholderPreprocessorPipeline:
             FixedMailingIdPreprocessor(),
             EnopentagPreprocessor(),
             GeneralGreyFooterNavPreprocessor(),
+            ViewTransactionButtonPreprocessor(),
+            TransactionDetailsTablePreprocessor(),
+            EnviewInBrowserTagPreprocessor(),
+            MsOrgIdPreprocessor(),
+            ParamCustAccUrlPreprocessor(),
             NamespacePreprocessor(),
             BrandNameDisplayPreprocessor(),
             SmRuleBrandColorPreprocessor(),

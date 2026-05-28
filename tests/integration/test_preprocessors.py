@@ -4,9 +4,16 @@ import pytest
 
 from shared.resolution.preprocessors import (
     ENOPENTAG_KEY,
+    ENVIEWINBROWSERTAG_KEY,
     FIXED_MAILINGID_KEY,
     FIXED_MAILINGID_VALUE,
+    MS_ORG_ID_KEY,
+    NETELLER_ACCOUNT_URL,
+    PARAM_CUST_ACC_URL_KEY,
+    SKRILL_ACCOUNT_URL,
     SM_RULE_BRAND_COLOR_KEY,
+    TRANSACTION_DETAILS_TABLE_KEY,
+    VIEW_TRANSACTION_BUTTON_KEY,
     preprocess_key,
 )
 from shared.resolution.resolver import resolve_body
@@ -45,6 +52,42 @@ def test_enopentag_preprocessing():
     context: dict[str, str] = {}
     assert preprocess_key("ENOPENTAG", context) == ENOPENTAG_KEY
     assert context[ENOPENTAG_KEY] == ""
+
+
+def test_view_transaction_button_preprocessing():
+    context: dict[str, str] = {}
+    assert preprocess_key("VIEW_TRANSACTION_BUTTON", context) == VIEW_TRANSACTION_BUTTON_KEY
+    assert context[VIEW_TRANSACTION_BUTTON_KEY] == ""
+
+
+def test_transaction_details_table_preprocessing():
+    context: dict[str, str] = {}
+    assert preprocess_key("TRANSACTION_DETAILS_TABLE", context) == TRANSACTION_DETAILS_TABLE_KEY
+    assert context[TRANSACTION_DETAILS_TABLE_KEY] == ""
+
+
+def test_enviewinbrowsertag_preprocessing():
+    context: dict[str, str] = {}
+    assert preprocess_key("ENVIEWINBROWSERTAG", context) == ENVIEWINBROWSERTAG_KEY
+    assert context[ENVIEWINBROWSERTAG_KEY] == ""
+
+
+def test_ms_org_id_preprocessing():
+    context: dict[str, str] = {}
+    assert preprocess_key("_MS_ORG_ID", context) == MS_ORG_ID_KEY
+    assert context[MS_ORG_ID_KEY] == ""
+
+
+def test_param_cust_acc_url_skrill():
+    context = {"PARAM_CUST_BRAND": "SKRILL"}
+    assert preprocess_key("PARAM_CUST_ACC_URL", context) == PARAM_CUST_ACC_URL_KEY
+    assert context[PARAM_CUST_ACC_URL_KEY] == SKRILL_ACCOUNT_URL
+
+
+def test_param_cust_acc_url_neteller():
+    context = {"PARAM_CUST_BRAND": "NETELLER"}
+    assert preprocess_key("PARAM_CUST_ACC_URL", context) == PARAM_CUST_ACC_URL_KEY
+    assert context[PARAM_CUST_ACC_URL_KEY] == NETELLER_ACCOUNT_URL
 
 
 @pytest.mark.asyncio
