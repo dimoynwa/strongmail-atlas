@@ -55,7 +55,7 @@
                 "--reload"
             ],
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
+                "PYTHONPATH": "${workspaceFolder}"
             },
             "envFile": "${workspaceFolder}/.env",
             "console": "integratedTerminal",
@@ -81,9 +81,55 @@
             "cwd": "${workspaceFolder}",
             "envFile": "${workspaceFolder}/.env",
             "env": {
-              "PYTHONPATH": "${workspaceFolder}"
+                "PYTHONPATH": "${workspaceFolder}"
             },
             "python": "${workspaceFolder}/.venv/bin/python"
-          }
+        },
+        {
+            "name": "FastAPI: Agent Studio API",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "api.main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+                "--workers",
+                "1",
+                "--reload"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TEMPLATE_ASSISTANT_MODEL": "bedrock_nova_pro",
+                "OTEL_SDK_DISABLED": "true"
+            },
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Streamlit: Agent Studio",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "${workspaceFolder}/app/main.py",
+                "--server.port",
+                "8501"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TEMPLATE_ASSISTANT_MODEL": "bedrock_nova_pro",
+                "OTEL_SDK_DISABLED": "true"
+            },
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "envFile": "${workspaceFolder}/.env",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
     ]
 }

@@ -6,6 +6,7 @@ import re
 from abc import ABC, abstractmethod
 
 ARGDELIMITER_SPACE_KEY = "__ARGDELIMITER_SPACE__"
+IGNCLICKTAG_KEY = "__IGNCLICKTAG__"
 IGNCLICKTAG_SPACE_KEY = "__IGNCLICKTAG_SPACE__"
 FIXED_MAILINGID_KEY = "__FIXED_MAILINGID__"
 FIXED_MAILINGID_VALUE = "1914"
@@ -18,7 +19,15 @@ SM_RULE_BRAND_BURGER_MENU_COLOR_KEY = "__SM_RULE_BRAND_BURGER_MENU_COLOR__"
 SM_RULE_BRAND_BURGER_WRAPPER_COLOR_KEY = "__SM_RULE_BRAND_BURGER_WRAPPER_COLOR__"
 GENERAL_GREY_FOOTER_NAV_KEY = "__GENERAL_GREY_FOOTER_NAV__"
 ENOPENTAG_KEY = "__ENOPENTAG__"
+VIEW_TRANSACTION_BUTTON_KEY = "__VIEW_TRANSACTION_BUTTON__"
+TRANSACTION_DETAILS_TABLE_KEY = "__TRANSACTION_DETAILS_TABLE__"
+ENVIEWINBROWSERTAG_KEY = "__ENVIEWINBROWSERTAG__"
+MS_ORG_ID_KEY = "__MS_ORG_ID__"
+PARAM_CUST_ACC_URL_KEY = "__PARAM_CUST_ACC_URL__"
 SM_RULE_SKIP_KEY = "__SM_RULE_SKIP__"
+
+SKRILL_ACCOUNT_URL = "https://account.skrill.com/wallet"
+NETELLER_ACCOUNT_URL = "https://member.neteller.com/wallet/account/login"
 
 NETELLER_COLOR = "#255F11"
 DEFAULT_BRAND_COLOR = "#910590"
@@ -127,6 +136,13 @@ class ArgDelimiterSpacePreprocessor(PlaceholderPreprocessor):
         return key
 
 
+class IgnClickTagPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "IGNCLICKTAG":
+            return _inject(context, IGNCLICKTAG_KEY, "")
+        return key
+
+
 class IgnClickTagSpacePreprocessor(PlaceholderPreprocessor):
     def process(self, key: str, context: dict[str, str]) -> str:
         if _IGNCLICKTAG_KEY_PATTERN.match(key):
@@ -153,6 +169,42 @@ class GeneralGreyFooterNavPreprocessor(PlaceholderPreprocessor):
         if key == "GENERAL_GREY_FOOTER_NAV":
             return _inject(context, GENERAL_GREY_FOOTER_NAV_KEY, "")
         return key
+
+
+class ViewTransactionButtonPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "VIEW_TRANSACTION_BUTTON":
+            return _inject(context, VIEW_TRANSACTION_BUTTON_KEY, "")
+        return key
+
+
+class TransactionDetailsTablePreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "TRANSACTION_DETAILS_TABLE":
+            return _inject(context, TRANSACTION_DETAILS_TABLE_KEY, "")
+        return key
+
+
+class EnviewInBrowserTagPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "ENVIEWINBROWSERTAG":
+            return _inject(context, ENVIEWINBROWSERTAG_KEY, "")
+        return key
+
+
+class MsOrgIdPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key == "_MS_ORG_ID":
+            return _inject(context, MS_ORG_ID_KEY, "")
+        return key
+
+
+class ParamCustAccUrlPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        if key != "PARAM_CUST_ACC_URL":
+            return key
+        url = SKRILL_ACCOUNT_URL if _brand(context) == "SKRILL" else NETELLER_ACCOUNT_URL
+        return _inject(context, PARAM_CUST_ACC_URL_KEY, url)
 
 
 class NamespacePreprocessor(PlaceholderPreprocessor):
@@ -266,6 +318,28 @@ class SmRuleBrandLogoPreprocessor(PlaceholderPreprocessor):
         )
 
 
+class SmRuleBrandLogo2Preprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        return _skip_or_delegate(
+            key,
+            context,
+            "SM_RULE_BRAND_LOGO_2",
+            GENERAL_HEADER_LOGO_2_NETELLER,
+            GENERAL_HEADER_LOGO_2_SKRILL,
+        )
+
+
+class SmRuleGeneralBrandLogoPreprocessor(PlaceholderPreprocessor):
+    def process(self, key: str, context: dict[str, str]) -> str:
+        return _skip_or_delegate(
+            key,
+            context,
+            "SM_RULE_GENERAL_BRAND_LOGO",
+            GENERAL_HEADER_LOGO_NETELLER,
+            GENERAL_HEADER_LOGO_SKRILL,
+        )
+
+
 class SmRuleGeneralBrandLogo2Preprocessor(PlaceholderPreprocessor):
     def process(self, key: str, context: dict[str, str]) -> str:
         return _skip_or_delegate(
@@ -335,10 +409,16 @@ def default_preprocessor_pipeline() -> PlaceholderPreprocessorPipeline:
         [
             FspCapitalizePreprocessor(),
             ArgDelimiterSpacePreprocessor(),
+            IgnClickTagPreprocessor(),
             IgnClickTagSpacePreprocessor(),
             FixedMailingIdPreprocessor(),
             EnopentagPreprocessor(),
             GeneralGreyFooterNavPreprocessor(),
+            ViewTransactionButtonPreprocessor(),
+            TransactionDetailsTablePreprocessor(),
+            EnviewInBrowserTagPreprocessor(),
+            MsOrgIdPreprocessor(),
+            ParamCustAccUrlPreprocessor(),
             NamespacePreprocessor(),
             BrandNameDisplayPreprocessor(),
             SmRuleBrandColorPreprocessor(),
@@ -349,6 +429,8 @@ def default_preprocessor_pipeline() -> PlaceholderPreprocessorPipeline:
             SmRuleBrandBurgerMenuColorPreprocessor(),
             SmRuleBrandBurgerWrapperColorPreprocessor(),
             SmRuleBrandLogoPreprocessor(),
+            SmRuleBrandLogo2Preprocessor(),
+            SmRuleGeneralBrandLogoPreprocessor(),
             SmRuleGeneralBrandLogo2Preprocessor(),
             SmRuleBrandSignOffLogoPreprocessor(),
             SmRuleBrandFooterPreprocessor(),

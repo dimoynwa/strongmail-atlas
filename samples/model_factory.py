@@ -31,11 +31,23 @@ else:
     if _env_truthy("LITELLM_SUPPRESS_DEBUG_INFO", "true"):
         litellm.suppress_debug_info = True
 
-from strongmail.template_rag.litellm_providers import (
-    qwen_api_base,
-    qwen_api_key,
-    qwen_litellm_model,
-)
+# --- Qwen (OpenAI-compatible server) — also used by ``adk_agents.model_factory`` -----------------
+
+_DEFAULT_QWEN_MODEL = "openai//models/Qwen/Qwen3.5-27B"
+_DEFAULT_QWEN_BASE = "http://gpuserver2.neterra.skrill.net:8010/v1"
+_DEFAULT_QWEN_KEY = "fake"
+
+
+def qwen_litellm_model() -> str:
+    return os.getenv("QWEN_LITELLM_MODEL", _DEFAULT_QWEN_MODEL)
+
+
+def qwen_api_base() -> str:
+    return os.getenv("QWEN_BASE_URL", _DEFAULT_QWEN_BASE)
+
+
+def qwen_api_key() -> str:
+    return os.getenv("QWEN_API_KEY", _DEFAULT_QWEN_KEY)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4")  # default model
