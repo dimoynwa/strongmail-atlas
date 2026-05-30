@@ -23,7 +23,12 @@ def normalize_stored_tones(raw: Any) -> dict[str, float] | None:
     if isinstance(raw, str):
         raw = json.loads(raw)
     if isinstance(raw, dict):
-        return {str(k): float(v) for k, v in raw.items()}
+        scores = {
+            str(k): float(v)
+            for k, v in raw.items()
+            if k != "_warning" and isinstance(v, (int, float))
+        }
+        return scores or None
     if isinstance(raw, list):
         scores: dict[str, float] = {}
         for item in raw:

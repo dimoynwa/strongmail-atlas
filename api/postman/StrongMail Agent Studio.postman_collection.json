@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "strongmail-agent-studio-api",
     "name": "StrongMail Agent Studio API",
-    "description": "FastAPI wrapper for StrongMail Agent Studio.\n\nRun requests top-to-bottom. `POST /session` saves `session_id` automatically for later requests.\n\nPrerequisites: PostgreSQL, Redis, and GoEmotions model loaded (first startup may take ~30–60s).\n\nTemplate refresh (`/refresh/*`) additionally requires `STRONGMAIL_PASSWORD`, `DATABASE_URL`, and the extraction pipeline on `PYTHONPATH` (see `paysafe-email-tone-of-voice`). `POST /refresh/template/{name}` saves `job_id` for status and SSE requests.",
+    "description": "FastAPI wrapper for StrongMail Agent Studio.\n\nRun requests top-to-bottom. `POST /session` saves `session_id` automatically for later requests.\n\nPrerequisites: PostgreSQL, Redis, and GoEmotions model loaded (first startup may take ~30–60s).\n\nTemplate refresh (`/refresh/*`) additionally requires `STRONGMAIL_PASSWORD`, `DATABASE_URL`, and the extraction pipeline on `PYTHONPATH` (see `paysafe-email-tone-of-voice`). `POST /refresh/template/{name}` saves `job_id` for status and SSE requests.\n\nTone batch operations (`/tone/batch-*`, `/tone/reevaluate`, `/tone/export`) require `DATABASE_URL` and Redis. Batch jobs use EN/SKRILL context and share the refresh thread pool.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -43,6 +43,11 @@
     },
     {
       "key": "job_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tone_job_id",
       "value": "",
       "type": "string"
     }
@@ -179,7 +184,7 @@
     },
     {
       "name": "5. Tone",
-      "description": "Evaluate emotional tone and read stored baseline scores.",
+      "description": "Evaluate emotional tone, read stored baseline scores, reevaluate single templates, and export evaluations.",
       "item": [
         {
           "name": "GET /tone/stored/{session_id}",
@@ -206,7 +211,48 @@
               "raw": "{\n  \"top_n\": 5\n}"
             },
             "url": "{{baseUrl}}/tone/evaluate/{{session_id}}",
-            "description": "Runs GoEmotions on the resolved template text. Body is optional (top_n defaults to 5)."
+            "description": "Runs GoEmotions on the resolved template text. Body is optional (top_n defaults to 5).\n\nResponse includes `plain_text` (the extracted input used for scoring), `plain_text_length`, `emotions`, `evaluated_from`, and optional `warning`."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /tone/reevaluate/{template_name}",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/tone/reevaluate/{{template_name}}",
+            "description": "Session-independent reevaluation for a single template. Resolves the template graph, scores with GoEmotions, upserts top-3 emotions to `template_tone_evaluations` (EN/SKRILL), and returns the result.\n\n404 if template not found. 503 if GoEmotions model is not loaded.\n\nResponse: `{ template_name, emotions, model, evaluated_at, warning }`. The `_warning` sentinel is never included in `emotions` — it appears only in the top-level `warning` field (e.g. `no_meaningful_text`, `unresolvable_keys`)."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tone/export (CSV)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tone/export",
+            "description": "Download all stored tone evaluations as CSV (default format). Columns: NAME, SUBJECT, SUMMARY, TONE_1, SCORE_1, TONE_2, SCORE_2, TONE_3, SCORE_3, WARNING.\n\nOnly templates with a stored evaluation row (EN/SKRILL) are included. Subject placeholders (`##...##`) are resolved via the graph when possible."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tone/export (Excel)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tone/export?format=xlsx",
+              "host": ["{{baseUrl}}"],
+              "path": ["tone", "export"],
+              "query": [
+                {
+                  "key": "format",
+                  "value": "xlsx",
+                  "description": "Export format: csv (default) or xlsx"
+                }
+              ]
+            },
+            "description": "Download all stored tone evaluations as an Excel (.xlsx) file. Same columns as the CSV export."
           },
           "response": []
         }
@@ -550,6 +596,72 @@
             "header": [],
             "url": "{{baseUrl}}/refresh/full",
             "description": "Start a full database refresh (all templates, blocks, rules, tones, embeddings). Long-running — use status/SSE to monitor.\n\n409 if any refresh job is already active. 503 if credentials are missing."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "14. Tone Batch Operations",
+      "description": "Batch reevaluation of all templates with EN/SKRILL tone evaluations. Jobs run asynchronously on the shared refresh thread pool — poll status or stream SSE progress.\n\nRequires server env: `DATABASE_URL`, `REDIS_URL`, and GoEmotions loaded.\n\nOnly one batch tone job may run at a time (`tone-lock:batch`). Tone batch locks are isolated from refresh locks.",
+      "item": [
+        {
+          "name": "POST /tone/batch-reevaluate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('tone_job_id', body.job_id);",
+                  "    pm.test('tone_job_id captured', () => pm.expect(body.job_id).to.be.a('string').and.not.empty);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/tone/batch-reevaluate",
+            "description": "Start a batch tone reevaluation for all templates with a `template_details` row. Returns `202 Accepted` with `{ \"job_id\": \"tone-...\", \"status\": \"pending\" }`.\n\n409 if a batch job is already running: `{ \"job_id\": null, \"status\": \"blocked\", \"locked_by\": \"tone-...\" }`.\n\n503 if GoEmotions model is not loaded or `DATABASE_URL` is unset."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tone/batch-status/{tone_job_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tone/batch-status/{{tone_job_id}}",
+            "description": "Poll batch tone job status without SSE. Returns job_id, status (pending|running|done|failed), started_at, finished_at, error."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tone/batch-stream/{tone_job_id} (SSE)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/tone/batch-stream/{{tone_job_id}}",
+            "description": "Stream real-time batch tone progress events. Replays buffered history, then polls until `job_done` or `job_failed`.\n\nSteps: load_templates → resolve_and_evaluate (item_done per template) → store_results → job_done.\n\nExample SSE line:\n`data: {\"type\":\"item_done\",\"step\":\"resolve_and_evaluate\",\"message\":\"Evaluated 'TEMPLATE_NAME'\",\"count\":1,\"total\":726,\"timestamp\":\"...\"}`"
+          },
+          "response": []
+        },
+        {
+          "name": "GET /tone/batch-active",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/tone/batch-active",
+            "description": "List all pending or running tone batch jobs. Returns `{ \"jobs\": [ { job_id, status, started_at }, ... ] }`."
           },
           "response": []
         }
