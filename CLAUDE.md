@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
-at `specs/015-template-refresh-system/plan.md`.
+shell commands, and other important information, read the current plan:
+/Users/dimo.drangov/DevelopmentTools/AI/strongmail-atlas/specs/016-tone-batch-operations/plan.md
 <!-- SPECKIT END -->

@@ -88,3 +88,25 @@ async def test_get_stored_tone_scores(db_pool, session_state):
 async def test_get_stored_tone_scores_none_when_missing(db_pool, session_state):
     await _seed_template(db_pool, "TestTemplate", html="<p>Body</p>")
     assert await get_stored_tone_scores(session_state) is None
+
+
+@pytest.mark.asyncio
+async def test_get_stored_tone_scores_strips_warning_sentinel(db_pool, session_state):
+    await _seed_template(db_pool, "TestTemplate", html="<p>Body</p>")
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO template_tone_evaluations
+                (template_id, model_id, lang_local, param_cust_brand, tones)
+            VALUES ('tpl-1', 'goemotions', 'EN-US', 'BRANDX', $1::jsonb)
+            """,
+            json.dumps(
+                {
+                    "joy": 0.8,
+                    "love": 0.2,
+                    "_warning": "unresolvable_keys",
+                }
+            ),
+        )
+    scores = await get_stored_tone_scores(session_state)
+    assert scores == {"joy": 0.8, "love": 0.2}

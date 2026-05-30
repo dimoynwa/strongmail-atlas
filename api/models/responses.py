@@ -95,7 +95,16 @@ class ToneEvaluateResponse(BaseModel):
     emotions: dict[str, float]
     model: str
     evaluated_from: str
+    plain_text: str
     plain_text_length: int
+    warning: str | None = None
+
+
+class ToneReevaluateResponse(BaseModel):
+    template_name: str
+    emotions: dict[str, float]
+    model: str
+    evaluated_at: str
     warning: str | None = None
 
 

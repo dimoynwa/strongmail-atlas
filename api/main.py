@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import state
-from api.routers import chat, health, preview, refresh, session, templates, tone, working_copy
+from api.routers import chat, health, preview, refresh, session, templates, tone, tone_batch, working_copy
 from shared.config import DATABASE_URL, REDIS_URL
 from shared.db import close_pool, init_pool
 from shared.redis_client import init_redis
@@ -24,6 +24,9 @@ async def lifespan(app: FastAPI):
     from api.refresh.job_registry import mark_orphaned_jobs_failed
 
     mark_orphaned_jobs_failed(REDIS_URL)
+    from api.tone_batch.job_registry import mark_orphaned_tone_jobs_failed
+
+    mark_orphaned_tone_jobs_failed(REDIS_URL)
     yield
     await close_pool()
     if state.redis_client is not None:
@@ -72,5 +75,6 @@ app.include_router(chat.router)
 app.include_router(working_copy.router)
 app.include_router(preview.router)
 app.include_router(tone.router)
+app.include_router(tone_batch.router, prefix="/tone")
 app.include_router(health.router)
 app.include_router(refresh.router)
