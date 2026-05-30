@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "strongmail-agent-studio-api",
     "name": "StrongMail Agent Studio API",
-    "description": "FastAPI wrapper for StrongMail Agent Studio.\n\nRun requests top-to-bottom. `POST /session` saves `session_id` automatically for later requests.\n\nPrerequisites: PostgreSQL, Redis, and GoEmotions model loaded (first startup may take ~30–60s).",
+    "description": "FastAPI wrapper for StrongMail Agent Studio.\n\nRun requests top-to-bottom. `POST /session` saves `session_id` automatically for later requests.\n\nPrerequisites: PostgreSQL, Redis, and GoEmotions model loaded (first startup may take ~30–60s).\n\nTemplate refresh (`/refresh/*`) additionally requires `STRONGMAIL_PASSWORD`, `DATABASE_URL`, and the extraction pipeline on `PYTHONPATH` (see `paysafe-email-tone-of-voice`). `POST /refresh/template/{name}` saves `job_id` for status and SSE requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -39,6 +39,11 @@
     {
       "key": "wc_value",
       "value": "Your Skrill password reset — action needed",
+      "type": "string"
+    },
+    {
+      "key": "job_id",
+      "value": "",
       "type": "string"
     }
   ],
@@ -454,6 +459,97 @@
             "header": [],
             "url": "{{baseUrl}}/working-copy/{{session_id}}",
             "description": "Deletes the entire working copy hash. Irreversible."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "13. Template Refresh",
+      "description": "Background re-extraction from StrongMail. Jobs run asynchronously — poll status or stream SSE progress.\n\nRequires server env: `STRONGMAIL_PASSWORD`, `DATABASE_URL`, `STRONGMAIL_ORG_ID`, `STRONGMAIL_USERNAME`, `REDIS_URL`.\n\nOptional: `PIPELINE_SKIP_SUMMARY_EMBED=1` to skip embedding when AWS Bedrock is unavailable.",
+      "item": [
+        {
+          "name": "POST /refresh/template/{template_name}",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('job_id', body.job_id);",
+                  "    pm.test('job_id captured', () => pm.expect(body.job_id).to.be.a('string').and.not.empty);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/refresh/template/{{template_name}}",
+            "description": "Start a targeted refresh for one template. Returns `{ \"job_id\": \"refresh-...\" }` immediately.\n\n409 if the template or a full refresh is already locked. 503 if `STRONGMAIL_PASSWORD` is unset. 404 if the template name is not in PostgreSQL."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /refresh/status/{job_id}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/refresh/status/{{job_id}}",
+            "description": "Poll job status without SSE. Returns job_id, type, target, status (pending|running|done|failed), started_at, finished_at, error."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /refresh/stream/{job_id} (SSE)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/refresh/stream/{{job_id}}",
+            "description": "Stream real-time progress events. Replays buffered history, then polls until `job_done` or `job_failed`.\n\nExample SSE line:\n`data: {\"type\":\"step_start\",\"step\":\"fetch_template_body\",\"message\":\"...\",\"timestamp\":\"...\"}`\n\nCanonical template steps: resolve_linked_blocks, fetch_template_body, fetch_content_blocks, fetch_dynamic_rules, evaluate_tone, embed_summary."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /refresh/active",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/refresh/active",
+            "description": "List all pending or running refresh jobs. Returns `{ \"jobs\": [ { job_id, type, target, status, started_at }, ... ] }`."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /refresh/full",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const body = pm.response.json();",
+                  "    pm.collectionVariables.set('job_id', body.job_id);",
+                  "    pm.test('job_id captured', () => pm.expect(body.job_id).to.be.a('string').and.not.empty);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/refresh/full",
+            "description": "Start a full database refresh (all templates, blocks, rules, tones, embeddings). Long-running — use status/SSE to monitor.\n\n409 if any refresh job is already active. 503 if credentials are missing."
           },
           "response": []
         }

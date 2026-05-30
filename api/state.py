@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from google.adk.runners import Runner
@@ -25,6 +26,8 @@ general_runner = Runner(
     app_name=GENERAL_APP,
     session_service=session_service,
 )
+
+refresh_executor = ThreadPoolExecutor(max_workers=2)
 
 db_pool = None
 redis_client = None
